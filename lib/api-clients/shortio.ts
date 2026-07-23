@@ -189,25 +189,26 @@ export async function fetchAllShortIOData(
       total_clicks: stats.clicks || 0,
       human_clicks: stats.humanClicks || 0,
       country: 'ALL',
-      city: '',
-      os: '',
-      browser: '',
-      referrer: '',
+      city: 'ALL',
+      os: 'ALL',
+      browser: 'ALL',
+      referrer: 'ALL',
     })
 
-    // Country breakdown rows
+    // Country breakdown rows — unique link_id per dimension type
     if (Array.isArray(stats.country)) {
       for (const c of stats.country) {
+        const countryName = c.countryName || c.country || 'Unknown'
         clickRows.push({
           date: today,
-          link_id: 'domain_aggregate',
+          link_id: 'by_country',
           total_clicks: c.score || 0,
           human_clicks: 0,
-          country: c.countryName || c.country || 'Unknown',
-          city: '',
-          os: '',
-          browser: '',
-          referrer: '',
+          country: countryName,
+          city: countryName,
+          os: 'ALL',
+          browser: 'ALL',
+          referrer: 'ALL',
         })
       }
     }
@@ -215,16 +216,34 @@ export async function fetchAllShortIOData(
     // Referrer breakdown rows
     if (Array.isArray(stats.referer)) {
       for (const r of stats.referer) {
+        const ref = r.refhost || r.referer || 'Unknown'
         clickRows.push({
           date: today,
-          link_id: 'domain_aggregate',
+          link_id: 'by_referrer',
           total_clicks: r.score || 0,
           human_clicks: 0,
-          country: '',
-          city: '',
-          os: '',
-          browser: '',
-          referrer: r.referer || 'Unknown',
+          country: 'ALL',
+          city: 'ALL',
+          os: 'ALL',
+          browser: 'ALL',
+          referrer: ref,
+        })
+      }
+    }
+
+    // Social platform breakdown
+    if (Array.isArray(stats.social)) {
+      for (const s of stats.social) {
+        clickRows.push({
+          date: today,
+          link_id: 'by_social',
+          total_clicks: s.score || 0,
+          human_clicks: 0,
+          country: 'ALL',
+          city: 'ALL',
+          os: 'ALL',
+          browser: 'ALL',
+          referrer: s.social || 'Unknown',
         })
       }
     }
@@ -234,14 +253,14 @@ export async function fetchAllShortIOData(
       for (const o of stats.os) {
         clickRows.push({
           date: today,
-          link_id: 'domain_aggregate',
+          link_id: 'by_os',
           total_clicks: o.score || 0,
           human_clicks: 0,
-          country: '',
-          city: '',
+          country: 'ALL',
+          city: 'ALL',
           os: o.os || 'Unknown',
-          browser: '',
-          referrer: '',
+          browser: 'ALL',
+          referrer: 'ALL',
         })
       }
     }
@@ -251,14 +270,14 @@ export async function fetchAllShortIOData(
       for (const b of stats.browser) {
         clickRows.push({
           date: today,
-          link_id: 'domain_aggregate',
+          link_id: 'by_browser',
           total_clicks: b.score || 0,
           human_clicks: 0,
-          country: '',
-          city: '',
-          os: '',
+          country: 'ALL',
+          city: 'ALL',
+          os: 'ALL',
           browser: b.browser || 'Unknown',
-          referrer: '',
+          referrer: 'ALL',
         })
       }
     }
@@ -273,11 +292,11 @@ export async function fetchAllShortIOData(
             link_id: 'domain_daily',
             total_clicks: point.y || 0,
             human_clicks: 0,
-            country: '',
-            city: '',
-            os: '',
-            browser: '',
-            referrer: '',
+            country: 'ALL',
+            city: 'ALL',
+            os: 'ALL',
+            browser: 'ALL',
+            referrer: 'ALL',
           })
         }
       }
