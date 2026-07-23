@@ -59,12 +59,19 @@ async function getDomainId(apiKey: string, domain: string): Promise<number | nul
 
   try {
     const data = await shortioFetch(`${API_BASE}/api/domains`, apiKey)
-    const domains = Array.isArray(data) ? data : []
+    // API may return a single object, an array, or { list: [...] }
+    const domains: any[] = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.list)
+        ? data.list
+        : data?.id
+          ? [data]
+          : []
     const found = domains.find(
       (d: any) => d.hostname === domain || d.hostname === domain.toLowerCase()
     )
     if (!found) {
-      console.warn(`[shortio] Domain "${domain}" not found. Available: ${domains.map((d: any) => d.hostname).join(', ')}`)
+      console.warn(`[shortio] Domain "${domain}" not found in ${domains.length} domains. Available: ${domains.map((d: any) => d.hostname).join(', ')}`)
       return null
     }
     _cachedDomainId = found.id
