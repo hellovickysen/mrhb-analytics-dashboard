@@ -235,7 +235,7 @@ interface TopPostTableRow {
   searchPosition: string
 }
 
-const topPostColumns: DataTableColumn<TopPostTableRow>[] = [
+const topPostColumns: DataTableColumn[] = [
   { key: 'title', label: 'Title', sortable: true },
   { key: 'pageviews', label: 'Pageviews', sortable: true, align: 'right' },
   { key: 'avgTimeOnPage', label: 'Avg Time on Page', sortable: true, align: 'right' },

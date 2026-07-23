@@ -5,17 +5,17 @@ import { ArrowUp, ArrowDown, ChevronsUpDown } from 'lucide-react'
 
 export type DataTableAlign = 'left' | 'right' | 'center'
 
-export interface DataTableColumn<T = Record<string, unknown>> {
-  /** Key into each row object this column renders. */
-  key: keyof T & string
+export interface DataTableColumn {
+  key: string
   label: string
   sortable?: boolean
   align?: DataTableAlign
 }
 
-export interface DataTableProps<T extends Record<string, unknown> = Record<string, unknown>> {
-  columns: DataTableColumn<T>[]
-  data: T[]
+export interface DataTableProps {
+  columns: DataTableColumn[]
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  data: Record<string, any>[]
   title?: string
   emptyMessage?: string
 }
@@ -28,13 +28,13 @@ const ALIGN_CLASS: Record<DataTableAlign, string> = {
   center: 'text-center',
 }
 
-export default function DataTable<T extends Record<string, unknown> = Record<string, unknown>>({
+export default function DataTable({
   columns,
   data,
   title,
   emptyMessage = 'No data available.',
-}: DataTableProps<T>) {
-  const [sortKey, setSortKey] = useState<(keyof T & string) | null>(null)
+}: DataTableProps) {
+  const [sortKey, setSortKey] = useState<string | null>(null)
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
 
   const sortedData = useMemo(() => {
@@ -57,7 +57,7 @@ export default function DataTable<T extends Record<string, unknown> = Record<str
     return copy
   }, [data, sortKey, sortDirection])
 
-  const handleSort = (column: DataTableColumn<T>) => {
+  const handleSort = (column: DataTableColumn) => {
     if (!column.sortable) return
 
     if (sortKey === column.key) {

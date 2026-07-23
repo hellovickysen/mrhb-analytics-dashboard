@@ -191,7 +191,7 @@ interface BrowserOsTableRow {
   avgSessionDuration: string
 }
 
-const sourceColumns: DataTableColumn<SourceTableRow>[] = [
+const sourceColumns: DataTableColumn[] = [
   { key: 'source', label: 'Source', sortable: true },
   { key: 'medium', label: 'Medium', sortable: true },
   { key: 'sessions', label: 'Sessions', sortable: true, align: 'right' },
@@ -199,7 +199,7 @@ const sourceColumns: DataTableColumn<SourceTableRow>[] = [
   { key: 'bounceRate', label: 'Bounce Rate', sortable: true, align: 'right' },
 ]
 
-const browserOsColumns: DataTableColumn<BrowserOsTableRow>[] = [
+const browserOsColumns: DataTableColumn[] = [
   { key: 'browser', label: 'Browser', sortable: true },
   { key: 'os', label: 'OS', sortable: true },
   { key: 'sessions', label: 'Sessions', sortable: true, align: 'right' },

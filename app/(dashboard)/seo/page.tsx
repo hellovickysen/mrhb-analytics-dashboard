@@ -192,7 +192,7 @@ interface PageTableRow {
   position: string
 }
 
-const queryColumns: DataTableColumn<QueryTableRow>[] = [
+const queryColumns: DataTableColumn[] = [
   { key: 'query', label: 'Query', sortable: true },
   { key: 'impressions', label: 'Impressions', sortable: true, align: 'right' },
   { key: 'clicks', label: 'Clicks', sortable: true, align: 'right' },
@@ -200,7 +200,7 @@ const queryColumns: DataTableColumn<QueryTableRow>[] = [
   { key: 'position', label: 'Avg Position', sortable: true, align: 'right' },
 ]
 
-const pageColumns: DataTableColumn<PageTableRow>[] = [
+const pageColumns: DataTableColumn[] = [
   { key: 'page', label: 'Page URL', sortable: true },
   { key: 'impressions', label: 'Impressions', sortable: true, align: 'right' },
   { key: 'clicks', label: 'Clicks', sortable: true, align: 'right' },
