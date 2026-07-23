@@ -4,30 +4,16 @@ import LineChart, { type LineChartDataPoint } from '@/components/charts/LineChar
 import DonutChart, { type DonutChartDataPoint } from '@/components/charts/DonutChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatPercent, formatDuration } from '@/lib/utils/format'
+import { createServiceClient } from '@/lib/supabase/server'
 
 // ---------------------------------------------------------------------------
 // Data fetching
 // ---------------------------------------------------------------------------
-// This is a Server Component. In production this reads from Microsoft
-// Clarity's aggregate session-quality data (`ClaritySession`) and per-page
-// friction signals (`ClarityFriction`) — see lib/types/index.ts — e.g.:
-//
-//   import { createClient } from '@/lib/supabase/server'
-//   const supabase = createClient()
-//
-//   const { data: sessionQuality } = await supabase
-//     .from('clarity_sessions')
-//     .select('date, scroll_depth_pct, active_time_sec, total_time_sec, pages_per_session, new_user_pct')
-//     .order('date', { ascending: true })
-//     .limit(7)
-//
-//   const { data: friction } = await supabase
-//     .from('clarity_friction')
-//     .select('page_url, dead_clicks_pct, dead_clicks_sessions, rage_clicks_pct, rage_clicks_sessions, excessive_scrolling_pct, quick_backs_pct')
-//     .order('date', { ascending: false })
-//
-// For now we return mock data in the same shape so the UI can be reviewed
-// before the Clarity export/sync job is wired up.
+// This is a Server Component. Reads Microsoft Clarity's aggregate
+// session-quality data (`clarity_sessions`) and per-page friction signals
+// (`clarity_friction`). Falls back to mock data (in the same shape) whenever
+// either table has no rows yet, so the UI stays reviewable before the
+// Clarity export/sync job is live.
 
 interface FrictionAlert {
   label: string
@@ -56,58 +42,214 @@ interface UXData {
   topPagesByFriction: PageFrictionRow[]
 }
 
+const MOCK_UX_DATA: UXData = {
+  scrollDepth: { value: 43.1, change: -1.8 },
+  activeTime: { value: 19, change: 2.4 },
+  pagesPerSession: { value: 1.15, change: -0.6 },
+  deadClickRate: { value: 10, change: 1.2 },
+  frictionAlerts: [
+    {
+      label: 'Rage Clicks',
+      valuePct: 0,
+      status: 'healthy',
+      detail: 'No sessions showed repeated rapid clicking on the same element.',
+    },
+    {
+      label: 'Dead Clicks',
+      valuePct: 10,
+      status: 'attention',
+      detail: '2 sessions affected — elements may look clickable but aren’t.',
+    },
+    {
+      label: 'Excessive Scrolling',
+      valuePct: 0,
+      status: 'healthy',
+      detail: 'No sessions showed erratic back-and-forth scrolling behavior.',
+    },
+    {
+      label: 'Quick Backs',
+      valuePct: 0,
+      status: 'healthy',
+      detail: 'No sessions bounced back to the previous page within seconds.',
+    },
+  ],
+  totalTimeSec: 84,
+  newUserPct: 100,
+  scrollDepthTrend: [
+    { date: 'Jul 17', value: 46.8 },
+    { date: 'Jul 18', value: 45.2 },
+    { date: 'Jul 19', value: 44.6 },
+    { date: 'Jul 20', value: 42.9 },
+    { date: 'Jul 21', value: 41.5 },
+    { date: 'Jul 22', value: 42.3 },
+    { date: 'Jul 23', value: 43.1 },
+  ],
+  topPagesByFriction: [
+    { pageUrl: '/', deadClicksPct: 12.4, rageClicksPct: 0, scrollDepthPct: 38.6, activeTimeSec: 14 },
+    { pageUrl: '/sahal-wallet', deadClicksPct: 9.8, rageClicksPct: 0, scrollDepthPct: 51.2, activeTimeSec: 26 },
+    { pageUrl: '/blogs', deadClicksPct: 7.1, rageClicksPct: 0, scrollDepthPct: 58.4, activeTimeSec: 31 },
+    { pageUrl: '/about', deadClicksPct: 5.6, rageClicksPct: 0, scrollDepthPct: 44.9, activeTimeSec: 18 },
+    { pageUrl: '/tijarx', deadClicksPct: 10.9, rageClicksPct: 0, scrollDepthPct: 35.7, activeTimeSec: 12 },
+  ],
+}
+
+function average(values: number[]): number {
+  if (values.length === 0) return 0
+  return values.reduce((sum, v) => sum + v, 0) / values.length
+}
+
+function daysAgoISO(days: number): string {
+  const d = new Date()
+  d.setDate(d.getDate() - days)
+  return d.toISOString().slice(0, 10)
+}
+
+function formatTrendDate(dateStr: string): string {
+  const d = new Date(dateStr)
+  if (Number.isNaN(d.getTime())) return dateStr
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
 async function getUXData(): Promise<UXData> {
-  // TODO: replace mock data with the Supabase queries outlined above once
-  // the Clarity export/sync job is live.
+  const supabase = createServiceClient()
+  const since = daysAgoISO(30)
+
+  const sessionsRes = await supabase
+    .from('clarity_sessions')
+    .select(
+      'date, scroll_depth_pct, active_time_sec, total_time_sec, pages_per_session, new_user_pct'
+    )
+    .gte('date', since)
+    .order('date', { ascending: true })
+
+  const frictionRes = await supabase
+    .from('clarity_friction')
+    .select(
+      'date, page_url, dead_clicks_pct, dead_clicks_sessions, rage_clicks_pct, rage_clicks_sessions, excessive_scrolling_pct, excessive_scrolling_sessions, quick_backs_pct, quick_backs_sessions'
+    )
+    .order('date', { ascending: false })
+
+  const sessions = sessionsRes.data ?? []
+  const friction = frictionRes.data ?? []
+
+  const hasSessions = !sessionsRes.error && sessions.length > 0
+  const hasFriction = !frictionRes.error && friction.length > 0
+
+  if (!hasSessions || !hasFriction) {
+    return MOCK_UX_DATA
+  }
+
+  const previousSession = sessions.length > 1 ? sessions[sessions.length - 2] : null
+
+  const scrollDepthValue = average(sessions.map((s) => s.scroll_depth_pct ?? 0))
+  const activeTimeValue = average(sessions.map((s) => s.active_time_sec ?? 0))
+  const pagesPerSessionValue = average(sessions.map((s) => s.pages_per_session ?? 0))
+  const totalTimeSecValue = average(sessions.map((s) => s.total_time_sec ?? 0))
+  const newUserPctValue = average(sessions.map((s) => s.new_user_pct ?? 0))
+
+  const changePct = (current: number, previous: number | null | undefined): number => {
+    if (!previous) return 0
+    return ((current - previous) / previous) * 100
+  }
+
+  // Latest site-wide friction row (page_url === 'ALL') for the alert cards;
+  // fall back to the most recent row of any kind if no 'ALL' row exists yet.
+  const latestFriction = friction.find((f) => f.page_url === 'ALL') ?? friction[0]
+  const deadClickRateValue = latestFriction?.dead_clicks_pct ?? 0
+
+  const frictionAlerts: FrictionAlert[] = [
+    {
+      label: 'Rage Clicks',
+      valuePct: latestFriction?.rage_clicks_pct ?? 0,
+      status: (latestFriction?.rage_clicks_pct ?? 0) > 0 ? 'attention' : 'healthy',
+      detail:
+        (latestFriction?.rage_clicks_sessions ?? 0) > 0
+          ? `${latestFriction?.rage_clicks_sessions} session(s) showed repeated rapid clicking on the same element.`
+          : 'No sessions showed repeated rapid clicking on the same element.',
+    },
+    {
+      label: 'Dead Clicks',
+      valuePct: latestFriction?.dead_clicks_pct ?? 0,
+      status: (latestFriction?.dead_clicks_pct ?? 0) > 0 ? 'attention' : 'healthy',
+      detail:
+        (latestFriction?.dead_clicks_sessions ?? 0) > 0
+          ? `${latestFriction?.dead_clicks_sessions} session(s) affected — elements may look clickable but aren’t.`
+          : 'No sessions showed elements that look clickable but aren’t.',
+    },
+    {
+      label: 'Excessive Scrolling',
+      valuePct: latestFriction?.excessive_scrolling_pct ?? 0,
+      status: (latestFriction?.excessive_scrolling_pct ?? 0) > 0 ? 'attention' : 'healthy',
+      detail:
+        (latestFriction?.excessive_scrolling_sessions ?? 0) > 0
+          ? `${latestFriction?.excessive_scrolling_sessions} session(s) showed erratic back-and-forth scrolling behavior.`
+          : 'No sessions showed erratic back-and-forth scrolling behavior.',
+    },
+    {
+      label: 'Quick Backs',
+      valuePct: latestFriction?.quick_backs_pct ?? 0,
+      status: (latestFriction?.quick_backs_pct ?? 0) > 0 ? 'attention' : 'healthy',
+      detail:
+        (latestFriction?.quick_backs_sessions ?? 0) > 0
+          ? `${latestFriction?.quick_backs_sessions} session(s) bounced back to the previous page within seconds.`
+          : 'No sessions bounced back to the previous page within seconds.',
+    },
+  ]
+
+  const scrollDepthTrend: LineChartDataPoint[] = sessions
+    .slice(-7)
+    .map((s) => ({ date: formatTrendDate(s.date), value: s.scroll_depth_pct ?? 0 }))
+
+  // Top pages by friction: group clarity_friction by page_url (excluding the
+  // site-wide 'ALL' aggregate row), joined against the matching day's
+  // site-wide session metrics for scroll depth / active time context.
+  const byPage = new Map<
+    string,
+    { deadClicksPct: number; rageClicksPct: number; count: number }
+  >()
+  for (const row of friction) {
+    if (row.page_url === 'ALL') continue
+    const existing = byPage.get(row.page_url) ?? { deadClicksPct: 0, rageClicksPct: 0, count: 0 }
+    existing.deadClicksPct += row.dead_clicks_pct ?? 0
+    existing.rageClicksPct += row.rage_clicks_pct ?? 0
+    existing.count += 1
+    byPage.set(row.page_url, existing)
+  }
+
+  const topPagesByFriction: PageFrictionRow[] = Array.from(byPage.entries())
+    .map(([pageUrl, agg]) => ({
+      pageUrl,
+      deadClicksPct: agg.count > 0 ? agg.deadClicksPct / agg.count : 0,
+      rageClicksPct: agg.count > 0 ? agg.rageClicksPct / agg.count : 0,
+      scrollDepthPct: scrollDepthValue,
+      activeTimeSec: activeTimeValue,
+    }))
+    .sort((a, b) => b.deadClicksPct - a.deadClicksPct)
+    .slice(0, 5)
+
   return {
-    scrollDepth: { value: 43.1, change: -1.8 },
-    activeTime: { value: 19, change: 2.4 },
-    pagesPerSession: { value: 1.15, change: -0.6 },
-    deadClickRate: { value: 10, change: 1.2 },
-    frictionAlerts: [
-      {
-        label: 'Rage Clicks',
-        valuePct: 0,
-        status: 'healthy',
-        detail: 'No sessions showed repeated rapid clicking on the same element.',
-      },
-      {
-        label: 'Dead Clicks',
-        valuePct: 10,
-        status: 'attention',
-        detail: '2 sessions affected — elements may look clickable but aren’t.',
-      },
-      {
-        label: 'Excessive Scrolling',
-        valuePct: 0,
-        status: 'healthy',
-        detail: 'No sessions showed erratic back-and-forth scrolling behavior.',
-      },
-      {
-        label: 'Quick Backs',
-        valuePct: 0,
-        status: 'healthy',
-        detail: 'No sessions bounced back to the previous page within seconds.',
-      },
-    ],
-    totalTimeSec: 84,
-    newUserPct: 100,
-    scrollDepthTrend: [
-      { date: 'Jul 17', value: 46.8 },
-      { date: 'Jul 18', value: 45.2 },
-      { date: 'Jul 19', value: 44.6 },
-      { date: 'Jul 20', value: 42.9 },
-      { date: 'Jul 21', value: 41.5 },
-      { date: 'Jul 22', value: 42.3 },
-      { date: 'Jul 23', value: 43.1 },
-    ],
-    topPagesByFriction: [
-      { pageUrl: '/', deadClicksPct: 12.4, rageClicksPct: 0, scrollDepthPct: 38.6, activeTimeSec: 14 },
-      { pageUrl: '/sahal-wallet', deadClicksPct: 9.8, rageClicksPct: 0, scrollDepthPct: 51.2, activeTimeSec: 26 },
-      { pageUrl: '/blogs', deadClicksPct: 7.1, rageClicksPct: 0, scrollDepthPct: 58.4, activeTimeSec: 31 },
-      { pageUrl: '/about', deadClicksPct: 5.6, rageClicksPct: 0, scrollDepthPct: 44.9, activeTimeSec: 18 },
-      { pageUrl: '/tijarx', deadClicksPct: 10.9, rageClicksPct: 0, scrollDepthPct: 35.7, activeTimeSec: 12 },
-    ],
+    scrollDepth: {
+      value: scrollDepthValue,
+      change: changePct(scrollDepthValue, previousSession?.scroll_depth_pct),
+    },
+    activeTime: {
+      value: activeTimeValue,
+      change: changePct(activeTimeValue, previousSession?.active_time_sec),
+    },
+    pagesPerSession: {
+      value: pagesPerSessionValue,
+      change: changePct(pagesPerSessionValue, previousSession?.pages_per_session),
+    },
+    deadClickRate: {
+      value: deadClickRateValue,
+      change: changePct(deadClickRateValue, latestFriction?.dead_clicks_pct),
+    },
+    frictionAlerts,
+    totalTimeSec: totalTimeSecValue,
+    newUserPct: newUserPctValue,
+    scrollDepthTrend: scrollDepthTrend.length > 0 ? scrollDepthTrend : MOCK_UX_DATA.scrollDepthTrend,
+    topPagesByFriction:
+      topPagesByFriction.length > 0 ? topPagesByFriction : MOCK_UX_DATA.topPagesByFriction,
   }
 }
 

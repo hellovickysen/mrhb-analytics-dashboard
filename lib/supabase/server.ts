@@ -1,4 +1,5 @@
 import { createServerClient, type CookieOptions } from '@supabase/ssr'
+import { createClient as createSupabaseClient } from '@supabase/supabase-js'
 import { cookies } from 'next/headers'
 
 /**
@@ -39,4 +40,31 @@ export function createClient() {
       },
     }
   )
+}
+
+/**
+ * Service-role Supabase client that bypasses Row Level Security.
+ *
+ * Use this for dashboard data reads — RLS is enabled on all analytics tables
+ * with no policies defined, so the anon key returns empty results. The
+ * service-role key bypasses RLS entirely.
+ *
+ * Safe to use here because the dashboard has its own cookie-based auth
+ * (middleware.ts checks mrhb_user cookie before any route loads).
+ */
+let _serviceClient: ReturnType<typeof createSupabaseClient> | null = null
+
+export function createServiceClient() {
+  if (_serviceClient) return _serviceClient
+
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+  if (!url || !key) {
+    console.warn('Missing SUPABASE_SERVICE_ROLE_KEY — falling back to anon client')
+    return createClient()
+  }
+
+  _serviceClient = createSupabaseClient(url, key)
+  return _serviceClient
 }

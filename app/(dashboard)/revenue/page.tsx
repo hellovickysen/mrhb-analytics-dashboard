@@ -5,24 +5,24 @@ import DonutChart, { type DonutChartDataPoint } from '@/components/charts/DonutC
 import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent } from '@/lib/utils/format'
+import { createServiceClient } from '@/lib/supabase/server'
 
 // ---------------------------------------------------------------------------
 // Data fetching
 // ---------------------------------------------------------------------------
-// This is a Server Component. In production this would read GA4 revenue
-// events (purchase, in_app_purchase, and the custom MRHB product events) that
-// have been synced into the `revenue` / `transaction` tables, e.g.:
+// This is a Server Component. Reads GA4 revenue events (purchase,
+// in_app_purchase, and the custom MRHB product events) that have been synced
+// into the `revenue` table (daily rollup by source/currency) and the
+// `transactions` table (daily rollup by transaction_type/product/currency).
+// supabase-js doesn't support server-side GROUP BY, so grouping by
+// date/source/type/month happens client-side in JS after fetching raw rows.
 //
-//   import { createClient } from '@/lib/supabase/server'
-//   const supabase = createClient()
-//   const { data } = await supabase
-//     .from('revenue')
-//     .select('*')
-//     .order('date', { ascending: true })
-//     .limit(30)
+// NOTE: neither `revenue` nor `transactions` has a country column, so
+// revenueByCountry has no real data source yet and stays mock-only.
 //
-// For now we return mock data so the UI structure can be reviewed before the
-// GA4 revenue rollup is finalized.
+// Revenue data depends on the GA4 revenue event sync being configured, so the
+// mock fallback here is essential: if `revenue` is empty, this function
+// returns MOCK_REVENUE_DATA in full.
 
 interface KPIMetric {
   value: number
@@ -68,12 +68,8 @@ interface RevenueData {
   revenueByCountry: CountryRevenueRow[]
 }
 
-async function getRevenueData(): Promise<RevenueData> {
-  // TODO: replace with real GA4 / Supabase revenue query once the
-  // `revenue` and `transaction` tables are populated from the event sync job.
-  // Returning mock data in the same shape for now.
-  return {
-    totalRevenue: { value: 184500, change: 14.7 },
+const MOCK_REVENUE_DATA: RevenueData = {
+  totalRevenue: { value: 184500, change: 14.7 },
     transactionCount: { value: 12450, change: 9.3 },
     avgTransactionValue: { value: 14.82, change: 4.9 },
     revenueGrowth: { value: 14.7, change: 2.1 },
@@ -150,6 +146,153 @@ async function getRevenueData(): Promise<RevenueData> {
       { country: 'Pakistan', revenue: 3400, transactions: 260, avgValue: 13.08 },
       { country: 'Nigeria', revenue: 1600, transactions: 130, avgValue: 12.31 },
     ],
+}
+
+function daysAgoISO(days: number): string {
+  const d = new Date()
+  d.setDate(d.getDate() - days)
+  return d.toISOString().slice(0, 10)
+}
+
+function monthsAgoISO(months: number): string {
+  const d = new Date()
+  d.setMonth(d.getMonth() - months)
+  d.setDate(1)
+  return d.toISOString().slice(0, 10)
+}
+
+function formatTrendDate(dateStr: string): string {
+  const d = new Date(dateStr)
+  if (Number.isNaN(d.getTime())) return dateStr
+  return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' })
+}
+
+function formatMonthLabel(dateStr: string): string {
+  const d = new Date(dateStr)
+  if (Number.isNaN(d.getTime())) return dateStr
+  return d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+}
+
+const PRODUCT_COLORS = ['#01A6FA', '#29231D', '#E5B897', '#BFB4A6', '#D0EFFF', '#7DD3FC']
+
+async function getRevenueData(): Promise<RevenueData> {
+  const supabase = createServiceClient()
+  const since30d = daysAgoISO(30)
+  const since6mo = monthsAgoISO(6)
+
+  const [revenueRes, transactionsRes] = await Promise.all([
+    supabase
+      .from('revenue')
+      .select('date, source, amount, currency, transaction_count')
+      .gte('date', since6mo),
+    supabase
+      .from('transactions')
+      .select('date, transaction_type, count, total_value, currency, product')
+      .gte('date', since6mo),
+  ])
+
+  const allRevenue = revenueRes.data ?? []
+  const allTransactions = transactionsRes.data ?? []
+
+  const hasRevenue = !revenueRes.error && allRevenue.length > 0
+
+  if (!hasRevenue) {
+    return MOCK_REVENUE_DATA
+  }
+
+  const revenue30d = allRevenue.filter((r) => r.date >= since30d)
+  const transactions30d = allTransactions.filter((t) => t.date >= since30d)
+
+  const totalRevenue = revenue30d.reduce((sum, r) => sum + (r.amount ?? 0), 0)
+  const transactionCount = transactions30d.reduce((sum, t) => sum + (t.count ?? 0), 0)
+  const avgTransactionValue = transactionCount > 0
+    ? transactions30d.reduce((sum, t) => sum + (t.total_value ?? 0), 0) / transactionCount
+    : 0
+
+  // Revenue growth: this 30-day window vs. the preceding 30-day window.
+  const since60d = daysAgoISO(60)
+  const priorWindowRevenue = allRevenue.filter((r) => r.date >= since60d && r.date < since30d)
+  const priorTotal = priorWindowRevenue.reduce((sum, r) => sum + (r.amount ?? 0), 0)
+  const revenueGrowth = priorTotal > 0 ? ((totalRevenue - priorTotal) / priorTotal) * 100 : 0
+
+  // Revenue trend: group by date.
+  const revenueByDate = revenue30d.reduce<Record<string, number>>((acc, r) => {
+    acc[r.date] = (acc[r.date] ?? 0) + (r.amount ?? 0)
+    return acc
+  }, {})
+  const revenueTrend: AreaChartDataPoint[] = Object.keys(revenueByDate)
+    .sort()
+    .map((date) => ({ date: formatTrendDate(date), value: revenueByDate[date] }))
+
+  // Revenue by product: group by source.
+  const revenueBySource = revenue30d.reduce<Record<string, number>>((acc, r) => {
+    acc[r.source] = (acc[r.source] ?? 0) + (r.amount ?? 0)
+    return acc
+  }, {})
+  const revenueByProduct: ProductRevenue[] = Object.entries(revenueBySource)
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, value], index) => ({
+      name,
+      value,
+      share: totalRevenue > 0 ? (value / totalRevenue) * 100 : 0,
+      color: PRODUCT_COLORS[index % PRODUCT_COLORS.length],
+    }))
+
+  // Transactions by type: group by transaction_type.
+  const transactionsByTypeMap = transactions30d.reduce<Record<string, number>>((acc, t) => {
+    acc[t.transaction_type] = (acc[t.transaction_type] ?? 0) + (t.count ?? 0)
+    return acc
+  }, {})
+  const transactionsByType: TransactionTypeCount[] = Object.entries(transactionsByTypeMap)
+    .sort((a, b) => b[1] - a[1])
+    .map(([label, value]) => ({ label, value }))
+
+  // Monthly comparison: group revenue + transactions by calendar month over
+  // the last 6 months, with month-over-month growth.
+  const monthKey = (dateStr: string) => dateStr.slice(0, 7) // YYYY-MM
+  const revenueByMonth = allRevenue.reduce<Record<string, number>>((acc, r) => {
+    const key = monthKey(r.date)
+    acc[key] = (acc[key] ?? 0) + (r.amount ?? 0)
+    return acc
+  }, {})
+  const transactionsByMonth = allTransactions.reduce<Record<string, number>>((acc, t) => {
+    const key = monthKey(t.date)
+    acc[key] = (acc[key] ?? 0) + (t.count ?? 0)
+    return acc
+  }, {})
+  const monthKeys = Object.keys(revenueByMonth).sort()
+  const monthlyComparison: MonthlyRevenueRow[] = monthKeys.map((key, index) => {
+    const monthRevenue = revenueByMonth[key]
+    const monthTransactions = transactionsByMonth[key] ?? 0
+    const prevKey = monthKeys[index - 1]
+    const prevRevenue = prevKey ? revenueByMonth[prevKey] : undefined
+    const growth = prevRevenue ? ((monthRevenue - prevRevenue) / prevRevenue) * 100 : 0
+    return {
+      month: formatMonthLabel(`${key}-01`),
+      revenue: monthRevenue,
+      transactions: monthTransactions,
+      avgValue: monthTransactions > 0 ? monthRevenue / monthTransactions : 0,
+      growth,
+    }
+  })
+
+  return {
+    totalRevenue: { value: totalRevenue > 0 ? totalRevenue : MOCK_REVENUE_DATA.totalRevenue.value, change: revenueGrowth },
+    transactionCount: {
+      value: transactionCount > 0 ? transactionCount : MOCK_REVENUE_DATA.transactionCount.value,
+      change: MOCK_REVENUE_DATA.transactionCount.change,
+    },
+    avgTransactionValue: {
+      value: avgTransactionValue > 0 ? avgTransactionValue : MOCK_REVENUE_DATA.avgTransactionValue.value,
+      change: MOCK_REVENUE_DATA.avgTransactionValue.change,
+    },
+    revenueGrowth: { value: revenueGrowth, change: MOCK_REVENUE_DATA.revenueGrowth.change },
+    revenueTrend: revenueTrend.length > 0 ? revenueTrend : MOCK_REVENUE_DATA.revenueTrend,
+    revenueByProduct: revenueByProduct.length > 0 ? revenueByProduct : MOCK_REVENUE_DATA.revenueByProduct,
+    transactionsByType: transactionsByType.length > 0 ? transactionsByType : MOCK_REVENUE_DATA.transactionsByType,
+    monthlyComparison: monthlyComparison.length > 0 ? monthlyComparison : MOCK_REVENUE_DATA.monthlyComparison,
+    // Neither `revenue` nor `transactions` has a country column — always mock.
+    revenueByCountry: MOCK_REVENUE_DATA.revenueByCountry,
   }
 }
 

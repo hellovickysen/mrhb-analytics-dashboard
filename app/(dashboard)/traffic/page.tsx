@@ -5,48 +5,19 @@ import DonutChart, { type DonutChartDataPoint } from '@/components/charts/DonutC
 import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent, formatDuration } from '@/lib/utils/format'
+import { createServiceClient } from '@/lib/supabase/server'
 
 // ---------------------------------------------------------------------------
 // Data fetching
 // ---------------------------------------------------------------------------
-// This is a Server Component. In production this reads from the `ga_traffic`
-// table (synced nightly from the GA4 Data API — see lib/types/index.ts
-// `GATraffic`), e.g.:
-//
-//   import { createClient } from '@/lib/supabase/server'
-//   const supabase = createClient()
-//
-//   // KPI totals + 30-day trend
-//   const { data: trend } = await supabase
-//     .from('ga_traffic')
-//     .select('date, sessions, users, new_users, bounce_rate, avg_session_duration')
-//     .gte('date', thirtyDaysAgo)
-//     .order('date', { ascending: true })
-//
-//   // Channel breakdown
-//   const { data: channels } = await supabase
-//     .from('ga_traffic')
-//     .select('channel, sessions.sum(), users.sum()')
-//     .gte('date', thirtyDaysAgo)
-//     .group('channel')
-//
-//   // Source/medium table
-//   const { data: sources } = await supabase
-//     .from('ga_traffic')
-//     .select('source, medium, sessions.sum(), users.sum(), bounce_rate.avg()')
-//     .gte('date', thirtyDaysAgo)
-//     .group('source, medium')
-//     .order('sessions', { ascending: false })
-//     .limit(10)
-//
-//   // Device / geo breakdown comes from `ga_geo` (see `GAGeo` type)
-//   const { data: geo } = await supabase
-//     .from('ga_geo')
-//     .select('country, device_category, browser, os, users.sum(), sessions.sum()')
-//     .gte('date', thirtyDaysAgo)
-//
-// For now we return mock data in the same shape so the UI can be reviewed
-// before the GA4 sync job is wired up.
+// Server Component — reads from the `ga_traffic` table (synced nightly from
+// the GA4 Data API — see lib/types/index.ts `GATraffic`) for KPIs/trend/
+// channel/source breakdowns, and from `ga_geo` (see `GAGeo`) for device,
+// country, and browser/OS breakdowns. PostgREST has no server-side GROUP BY,
+// so each query below pulls raw rows for the window and aggregates them in
+// JS. Every aggregation falls back to the matching MOCK_TRAFFIC slice when
+// Supabase returns an error or zero rows (missing table, RLS not yet
+// configured, or a genuinely quiet period).
 
 interface SourceRow {
   source: string
@@ -110,62 +81,275 @@ function buildSessionsUsersTrend(): AreaChartDataPoint[] {
   }))
 }
 
+const MOCK_TRAFFIC: TrafficData = {
+  sessions: { value: 52840, change: 9.8 },
+  users: { value: 38215, change: 7.2 },
+  newUsers: { value: 21460, change: 11.4 },
+  bounceRate: { value: 41.2, change: -2.6 },
+  avgSessionDuration: { value: 187, change: 5.1 },
+  sessionsUsersTrend: buildSessionsUsersTrend(),
+  channelBreakdown: [
+    { name: 'Organic Search', value: 21875 },
+    { name: 'Social', value: 13210 },
+    { name: 'Direct', value: 9640 },
+    { name: 'Referral', value: 5120 },
+    { name: 'Paid', value: 2995 },
+  ],
+  topSources: [
+    { source: 'google', medium: 'organic', sessions: 19840, users: 14320, bounceRate: 38.4 },
+    { source: 'instagram', medium: 'social', sessions: 7910, users: 5860, bounceRate: 52.1 },
+    { source: '(direct)', medium: '(none)', sessions: 9640, users: 7215, bounceRate: 33.6 },
+    { source: 'twitter', medium: 'social', sessions: 3480, users: 2540, bounceRate: 49.8 },
+    { source: 'facebook', medium: 'social', sessions: 1820, users: 1390, bounceRate: 55.3 },
+    { source: 'mrhbnetwork.short.gy', medium: 'referral', sessions: 2610, users: 1980, bounceRate: 44.2 },
+    { source: 'linkedin', medium: 'social', sessions: 1690, users: 1240, bounceRate: 46.7 },
+    { source: 'bing', medium: 'organic', sessions: 2035, users: 1610, bounceRate: 40.9 },
+    { source: 'google-ads', medium: 'cpc', sessions: 2995, users: 2180, bounceRate: 47.5 },
+    { source: 'islamicfinanceguru.com', medium: 'referral', sessions: 1310, users: 985, bounceRate: 36.2 },
+  ],
+  deviceBreakdown: [
+    { name: 'Mobile', value: 37460, color: '#01A6FA' },
+    { name: 'Desktop', value: 13120, color: '#29231D' },
+    { name: 'Tablet', value: 2260, color: '#E5B897' },
+  ],
+  topCountries: [
+    { label: 'United Arab Emirates', value: 16920 },
+    { label: 'Saudi Arabia', value: 12180 },
+    { label: 'United Kingdom', value: 6540 },
+    { label: 'United States', value: 5310 },
+    { label: 'Malaysia', value: 3680 },
+    { label: 'Pakistan', value: 2740 },
+    { label: 'Indonesia', value: 2190 },
+    { label: 'Qatar', value: 1620 },
+    { label: 'Kuwait', value: 1180 },
+    { label: 'Egypt', value: 960 },
+  ],
+  browserOsBreakdown: [
+    { browser: 'Chrome', os: 'Android', sessions: 22140, users: 15680, avgSessionDuration: 172 },
+    { browser: 'Safari', os: 'iOS', sessions: 14380, users: 10420, avgSessionDuration: 205 },
+    { browser: 'Chrome', os: 'Windows', sessions: 7210, users: 5340, avgSessionDuration: 196 },
+    { browser: 'Safari', os: 'macOS', sessions: 3960, users: 2890, avgSessionDuration: 224 },
+    { browser: 'Samsung Internet', os: 'Android', sessions: 2480, users: 1840, avgSessionDuration: 158 },
+    { browser: 'Edge', os: 'Windows', sessions: 1610, users: 1210, avgSessionDuration: 181 },
+    { browser: 'Firefox', os: 'Windows', sessions: 690, users: 520, avgSessionDuration: 190 },
+    { browser: 'Chrome', os: 'macOS', sessions: 370, users: 275, avgSessionDuration: 211 },
+  ],
+}
+
+/** YYYY-MM-DD (UTC), matching Postgres `date` columns. */
+function toDateString(d: Date): string {
+  return d.toISOString().slice(0, 10)
+}
+
+/** Percent change of `current` vs `previous`, guarding divide-by-zero. */
+function pctChange(current: number, previous: number): number {
+  if (!previous) return current > 0 ? 100 : 0
+  return ((current - previous) / previous) * 100
+}
+
+/** Formats a `YYYY-MM-DD` string as "Jul 23" to match the mock trend labels. */
+function formatShortDate(dateStr: string): string {
+  const d = new Date(`${dateStr}T00:00:00Z`)
+  if (Number.isNaN(d.getTime())) return dateStr
+  return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit', timeZone: 'UTC' })
+}
+
+interface GATrafficWindowRow {
+  date: string
+  sessions: number
+  users: number
+  new_users: number
+  bounce_rate: number
+  avg_session_duration: number
+  channel: string
+  source: string
+  medium: string
+}
+
+interface GAGeoWindowRow {
+  country: string
+  users: number
+  sessions: number
+  device_category: string
+  browser: string | null
+  os: string | null
+}
+
 async function getTrafficData(): Promise<TrafficData> {
-  // TODO: replace mock data with the Supabase queries outlined above once
-  // `ga_traffic` / `ga_geo` are populated by the GA4 sync job.
-  return {
-    sessions: { value: 52840, change: 9.8 },
-    users: { value: 38215, change: 7.2 },
-    newUsers: { value: 21460, change: 11.4 },
-    bounceRate: { value: 41.2, change: -2.6 },
-    avgSessionDuration: { value: 187, change: 5.1 },
-    sessionsUsersTrend: buildSessionsUsersTrend(),
-    channelBreakdown: [
-      { name: 'Organic Search', value: 21875 },
-      { name: 'Social', value: 13210 },
-      { name: 'Direct', value: 9640 },
-      { name: 'Referral', value: 5120 },
-      { name: 'Paid', value: 2995 },
-    ],
-    topSources: [
-      { source: 'google', medium: 'organic', sessions: 19840, users: 14320, bounceRate: 38.4 },
-      { source: 'instagram', medium: 'social', sessions: 7910, users: 5860, bounceRate: 52.1 },
-      { source: '(direct)', medium: '(none)', sessions: 9640, users: 7215, bounceRate: 33.6 },
-      { source: 'twitter', medium: 'social', sessions: 3480, users: 2540, bounceRate: 49.8 },
-      { source: 'facebook', medium: 'social', sessions: 1820, users: 1390, bounceRate: 55.3 },
-      { source: 'mrhbnetwork.short.gy', medium: 'referral', sessions: 2610, users: 1980, bounceRate: 44.2 },
-      { source: 'linkedin', medium: 'social', sessions: 1690, users: 1240, bounceRate: 46.7 },
-      { source: 'bing', medium: 'organic', sessions: 2035, users: 1610, bounceRate: 40.9 },
-      { source: 'google-ads', medium: 'cpc', sessions: 2995, users: 2180, bounceRate: 47.5 },
-      { source: 'islamicfinanceguru.com', medium: 'referral', sessions: 1310, users: 985, bounceRate: 36.2 },
-    ],
-    deviceBreakdown: [
-      { name: 'Mobile', value: 37460, color: '#01A6FA' },
-      { name: 'Desktop', value: 13120, color: '#29231D' },
-      { name: 'Tablet', value: 2260, color: '#E5B897' },
-    ],
-    topCountries: [
-      { label: 'United Arab Emirates', value: 16920 },
-      { label: 'Saudi Arabia', value: 12180 },
-      { label: 'United Kingdom', value: 6540 },
-      { label: 'United States', value: 5310 },
-      { label: 'Malaysia', value: 3680 },
-      { label: 'Pakistan', value: 2740 },
-      { label: 'Indonesia', value: 2190 },
-      { label: 'Qatar', value: 1620 },
-      { label: 'Kuwait', value: 1180 },
-      { label: 'Egypt', value: 960 },
-    ],
-    browserOsBreakdown: [
-      { browser: 'Chrome', os: 'Android', sessions: 22140, users: 15680, avgSessionDuration: 172 },
-      { browser: 'Safari', os: 'iOS', sessions: 14380, users: 10420, avgSessionDuration: 205 },
-      { browser: 'Chrome', os: 'Windows', sessions: 7210, users: 5340, avgSessionDuration: 196 },
-      { browser: 'Safari', os: 'macOS', sessions: 3960, users: 2890, avgSessionDuration: 224 },
-      { browser: 'Samsung Internet', os: 'Android', sessions: 2480, users: 1840, avgSessionDuration: 158 },
-      { browser: 'Edge', os: 'Windows', sessions: 1610, users: 1210, avgSessionDuration: 181 },
-      { browser: 'Firefox', os: 'Windows', sessions: 690, users: 520, avgSessionDuration: 190 },
-      { browser: 'Chrome', os: 'macOS', sessions: 370, users: 275, avgSessionDuration: 211 },
-    ],
+  try {
+    const supabase = createServiceClient()
+
+    const now = new Date()
+    const since60d = toDateString(new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000))
+    const cutoff30d = toDateString(new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000))
+
+    const [trafficResult, geoResult] = await Promise.all([
+      supabase
+        .from('ga_traffic')
+        .select('date, sessions, users, new_users, bounce_rate, avg_session_duration, channel, source, medium')
+        .gte('date', since60d)
+        .order('date', { ascending: true }),
+      supabase
+        .from('ga_geo')
+        .select('country, users, sessions, device_category, browser, os')
+        .gte('date', cutoff30d),
+    ])
+
+    const trafficRows = (!trafficResult.error && trafficResult.data
+      ? (trafficResult.data as GATrafficWindowRow[])
+      : []
+    ).filter((r) => r.date)
+
+    const geoRows = !geoResult.error && geoResult.data ? (geoResult.data as GAGeoWindowRow[]) : []
+
+    // No `ga_traffic` history at all (missing table / RLS / empty DB) —
+    // fall back to the full mock payload rather than mixing partial data.
+    if (trafficRows.length === 0) {
+      return MOCK_TRAFFIC
+    }
+
+    const currentRows = trafficRows.filter((r) => r.date >= cutoff30d)
+    const previousRows = trafficRows.filter((r) => r.date < cutoff30d)
+
+    const sumBy = (rows: GATrafficWindowRow[], key: 'sessions' | 'users' | 'new_users') =>
+      rows.reduce((total, row) => total + (row[key] ?? 0), 0)
+    const avgBy = (rows: GATrafficWindowRow[], key: 'bounce_rate' | 'avg_session_duration') =>
+      rows.length > 0 ? rows.reduce((total, row) => total + (row[key] ?? 0), 0) / rows.length : 0
+
+    const sessionsCurrent = sumBy(currentRows, 'sessions')
+    const sessionsPrevious = sumBy(previousRows, 'sessions')
+    const usersCurrent = sumBy(currentRows, 'users')
+    const usersPrevious = sumBy(previousRows, 'users')
+    const newUsersCurrent = sumBy(currentRows, 'new_users')
+    const newUsersPrevious = sumBy(previousRows, 'new_users')
+    const bounceRateCurrent = avgBy(currentRows, 'bounce_rate')
+    const bounceRatePrevious = avgBy(previousRows, 'bounce_rate')
+    const avgSessionDurationCurrent = avgBy(currentRows, 'avg_session_duration')
+    const avgSessionDurationPrevious = avgBy(previousRows, 'avg_session_duration')
+
+    // Sessions & users trend — daily totals for the current 30-day window.
+    const trendByDate = new Map<string, { sessions: number; users: number }>()
+    for (const row of currentRows) {
+      const entry = trendByDate.get(row.date) ?? { sessions: 0, users: 0 }
+      entry.sessions += row.sessions ?? 0
+      entry.users += row.users ?? 0
+      trendByDate.set(row.date, entry)
+    }
+    const sessionsUsersTrend: AreaChartDataPoint[] = Array.from(trendByDate.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, { sessions, users }]) => ({
+        date: formatShortDate(date),
+        value: sessions,
+        secondaryValue: users,
+      }))
+
+    // Channel breakdown — sessions grouped by channel.
+    const channelTotals = new Map<string, number>()
+    for (const row of currentRows) {
+      channelTotals.set(row.channel, (channelTotals.get(row.channel) ?? 0) + (row.sessions ?? 0))
+    }
+    const channelBreakdown: DonutChartDataPoint[] = Array.from(channelTotals.entries())
+      .sort(([, a], [, b]) => b - a)
+      .map(([name, value]) => ({ name, value }))
+
+    // Source/medium table — top 10 by sessions, with per-slice avg bounce rate.
+    const sourceAgg = new Map<string, { sessions: number; users: number; bounceSum: number; count: number }>()
+    for (const row of currentRows) {
+      const key = `${row.source} ${row.medium}`
+      const entry = sourceAgg.get(key) ?? { sessions: 0, users: 0, bounceSum: 0, count: 0 }
+      entry.sessions += row.sessions ?? 0
+      entry.users += row.users ?? 0
+      entry.bounceSum += row.bounce_rate ?? 0
+      entry.count += 1
+      sourceAgg.set(key, entry)
+    }
+    const topSources: SourceRow[] = Array.from(sourceAgg.entries())
+      .map(([key, agg]) => {
+        const [source, medium] = key.split(' ')
+        return {
+          source,
+          medium,
+          sessions: agg.sessions,
+          users: agg.users,
+          bounceRate: agg.count > 0 ? agg.bounceSum / agg.count : 0,
+        }
+      })
+      .sort((a, b) => b.sessions - a.sessions)
+      .slice(0, 10)
+
+    // Device / country / browser+OS breakdowns come from `ga_geo`.
+    let deviceBreakdown: DonutChartDataPoint[] = MOCK_TRAFFIC.deviceBreakdown
+    let topCountries: BarChartDataPoint[] = MOCK_TRAFFIC.topCountries
+    let browserOsBreakdown: BrowserOsRow[] = MOCK_TRAFFIC.browserOsBreakdown
+
+    if (geoRows.length > 0) {
+      const deviceTotals = new Map<string, number>()
+      const countryTotals = new Map<string, number>()
+      const browserOsAgg = new Map<string, { sessions: number; users: number }>()
+
+      for (const row of geoRows) {
+        deviceTotals.set(
+          row.device_category,
+          (deviceTotals.get(row.device_category) ?? 0) + (row.users ?? 0)
+        )
+        countryTotals.set(row.country, (countryTotals.get(row.country) ?? 0) + (row.users ?? 0))
+
+        const browser = row.browser ?? 'Unknown'
+        const os = row.os ?? 'Unknown'
+        const key = `${browser} ${os}`
+        const entry = browserOsAgg.get(key) ?? { sessions: 0, users: 0 }
+        entry.sessions += row.sessions ?? 0
+        entry.users += row.users ?? 0
+        browserOsAgg.set(key, entry)
+      }
+
+      deviceBreakdown = Array.from(deviceTotals.entries())
+        .sort(([, a], [, b]) => b - a)
+        .map(([name, value]) => ({ name, value }))
+
+      topCountries = Array.from(countryTotals.entries())
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, 10)
+        .map(([label, value]) => ({ label, value }))
+
+      browserOsBreakdown = Array.from(browserOsAgg.entries())
+        .map(([key, agg]) => {
+          const [browser, os] = key.split(' ')
+          return {
+            browser,
+            os,
+            sessions: agg.sessions,
+            users: agg.users,
+            // avg_session_duration isn't tracked per geo/device slice in
+            // `ga_geo`, so the site-wide current-window average is used as
+            // a reasonable per-row estimate rather than fabricating a value.
+            avgSessionDuration: avgSessionDurationCurrent,
+          }
+        })
+        .sort((a, b) => b.sessions - a.sessions)
+        .slice(0, 10)
+    }
+
+    return {
+      sessions: { value: sessionsCurrent, change: pctChange(sessionsCurrent, sessionsPrevious) },
+      users: { value: usersCurrent, change: pctChange(usersCurrent, usersPrevious) },
+      newUsers: { value: newUsersCurrent, change: pctChange(newUsersCurrent, newUsersPrevious) },
+      bounceRate: { value: bounceRateCurrent, change: pctChange(bounceRateCurrent, bounceRatePrevious) },
+      avgSessionDuration: {
+        value: avgSessionDurationCurrent,
+        change: pctChange(avgSessionDurationCurrent, avgSessionDurationPrevious),
+      },
+      sessionsUsersTrend: sessionsUsersTrend.length > 0 ? sessionsUsersTrend : MOCK_TRAFFIC.sessionsUsersTrend,
+      channelBreakdown: channelBreakdown.length > 0 ? channelBreakdown : MOCK_TRAFFIC.channelBreakdown,
+      topSources: topSources.length > 0 ? topSources : MOCK_TRAFFIC.topSources,
+      deviceBreakdown,
+      topCountries,
+      browserOsBreakdown,
+    }
+  } catch {
+    // Network failure, missing env vars, or any other unexpected error —
+    // the UI must always render, so fall all the way back to mock data.
+    return MOCK_TRAFFIC
   }
 }
 

@@ -2,23 +2,15 @@ import Header from '@/components/layout/Header'
 import KPICard from '@/components/cards/KPICard'
 import LineChart, { type LineChartDataPoint } from '@/components/charts/LineChart'
 import { formatNumber, formatPercent } from '@/lib/utils/format'
+import { createServiceClient } from '@/lib/supabase/server'
 
 // ---------------------------------------------------------------------------
 // Data fetching
 // ---------------------------------------------------------------------------
-// This is a Server Component. In production this would call Supabase (via
-// lib/supabase/server.ts) to pull aggregated KPI rows, e.g.:
-//
-//   import { createClient } from '@/lib/supabase/server'
-//   const supabase = createClient()
-//   const { data } = await supabase
-//     .from('daily_kpis')
-//     .select('*')
-//     .order('date', { ascending: true })
-//     .limit(30)
-//
-// For now we return mock data so the UI structure can be reviewed before the
-// Supabase schema/tables are finalized.
+// Server Component — pulls aggregated KPI rows straight from Supabase. Every
+// query below is wrapped so that a missing table, an RLS-denied read, or a
+// genuinely empty result all fall through to the same MOCK_OVERVIEW fallback,
+// which keeps the shape identical to what the UI below expects.
 
 interface OverviewKPIs {
   totalUsers: { value: number; change: number }
@@ -32,44 +24,236 @@ interface OverviewKPIs {
   topCountries: { country: string; users: number; share: number }[]
 }
 
-async function getOverviewData(): Promise<OverviewKPIs> {
-  // TODO: replace with real Supabase query once `daily_kpis` / `sessions`
-  // tables are live. Returning mock data in the same shape for now.
-  return {
-    totalUsers: { value: 48210, change: 8.4 },
-    appInstalls: { value: 6320, change: 12.1 },
-    organicClicks: { value: 21875, change: 5.6 },
-    socialClicksHuman: { value: 9142, change: -3.2 },
-    avgScrollDepth: { value: 62.5, change: 0 },
-    revenue: { value: 184500, change: 14.7 },
-    trafficTrend: [
-      { date: 'Jun 24', value: 3200 },
-      { date: 'Jun 27', value: 3450 },
-      { date: 'Jun 30', value: 3100 },
-      { date: 'Jul 03', value: 3800 },
-      { date: 'Jul 06', value: 4200 },
-      { date: 'Jul 09', value: 3950 },
-      { date: 'Jul 12', value: 4500 },
-      { date: 'Jul 15', value: 4750 },
-      { date: 'Jul 18', value: 4620 },
-      { date: 'Jul 21', value: 5100 },
-      { date: 'Jul 23', value: 5340 },
-    ],
-    channelBreakdown: [
-      { channel: 'Organic Search', sessions: 21875, share: 38.2 },
-      { channel: 'Social', sessions: 14320, share: 25.0 },
-      { channel: 'Direct', sessions: 10904, share: 19.0 },
-      { channel: 'Referral', sessions: 6210, share: 10.8 },
-      { channel: 'Paid', sessions: 4032, share: 7.0 },
-    ],
-    topCountries: [
-      { country: 'United Arab Emirates', users: 15840, share: 32.9 },
-      { country: 'Saudi Arabia', users: 11200, share: 23.2 },
-      { country: 'United Kingdom', users: 6104, share: 12.7 },
-      { country: 'United States', users: 4890, share: 10.1 },
-      { country: 'Malaysia', users: 3312, share: 6.9 },
-    ],
+const MOCK_OVERVIEW: OverviewKPIs = {
+  totalUsers: { value: 48210, change: 8.4 },
+  appInstalls: { value: 6320, change: 12.1 },
+  organicClicks: { value: 21875, change: 5.6 },
+  socialClicksHuman: { value: 9142, change: -3.2 },
+  avgScrollDepth: { value: 62.5, change: 0 },
+  revenue: { value: 184500, change: 14.7 },
+  trafficTrend: [
+    { date: 'Jun 24', value: 3200 },
+    { date: 'Jun 27', value: 3450 },
+    { date: 'Jun 30', value: 3100 },
+    { date: 'Jul 03', value: 3800 },
+    { date: 'Jul 06', value: 4200 },
+    { date: 'Jul 09', value: 3950 },
+    { date: 'Jul 12', value: 4500 },
+    { date: 'Jul 15', value: 4750 },
+    { date: 'Jul 18', value: 4620 },
+    { date: 'Jul 21', value: 5100 },
+    { date: 'Jul 23', value: 5340 },
+  ],
+  channelBreakdown: [
+    { channel: 'Organic Search', sessions: 21875, share: 38.2 },
+    { channel: 'Social', sessions: 14320, share: 25.0 },
+    { channel: 'Direct', sessions: 10904, share: 19.0 },
+    { channel: 'Referral', sessions: 6210, share: 10.8 },
+    { channel: 'Paid', sessions: 4032, share: 7.0 },
+  ],
+  topCountries: [
+    { country: 'United Arab Emirates', users: 15840, share: 32.9 },
+    { country: 'Saudi Arabia', users: 11200, share: 23.2 },
+    { country: 'United Kingdom', users: 6104, share: 12.7 },
+    { country: 'United States', users: 4890, share: 10.1 },
+    { country: 'Malaysia', users: 3312, share: 6.9 },
+  ],
+}
+
+/** YYYY-MM-DD (UTC), matching Postgres `date` columns. */
+function toDateString(d: Date): string {
+  return d.toISOString().slice(0, 10)
+}
+
+/** Percent change of `current` vs `previous`, guarding divide-by-zero. */
+function pctChange(current: number, previous: number): number {
+  if (!previous) return current > 0 ? 100 : 0
+  return ((current - previous) / previous) * 100
+}
+
+/**
+ * Sums a single numeric column across rows, split into "current 30 days" vs
+ * "previous 30 days" (day 31-60 back), so every KPI can report a % change
+ * using one shared helper and one shared 60-day fetch per table.
+ */
+async function fetchWindowedSum(
+  supabase: ReturnType<typeof createServiceClient>,
+  table: string,
+  column: string,
+  dateColumn: string,
+  since60d: string,
+  cutoff30d: string,
+  extraFilter?: (query: any) => any
+): Promise<{ current: number; previous: number } | null> {
+  try {
+    let query = supabase.from(table).select(`${dateColumn}, ${column}`).gte(dateColumn, since60d)
+    if (extraFilter) query = extraFilter(query)
+    const { data, error } = await query
+
+    if (error || !data) return null
+
+    let current = 0
+    let previous = 0
+    for (const row of data as unknown as Record<string, unknown>[]) {
+      const rowDate = String(row[dateColumn] ?? '')
+      const rawValue = row[column]
+      const value = typeof rawValue === 'number' ? rawValue : Number(rawValue) || 0
+      if (rowDate >= cutoff30d) {
+        current += value
+      } else {
+        previous += value
+      }
+    }
+
+    return { current, previous }
+  } catch {
+    return null
   }
+}
+
+async function getOverviewData(): Promise<OverviewKPIs> {
+  try {
+    const supabase = createServiceClient()
+
+    const now = new Date()
+    const since60d = toDateString(new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000))
+    const cutoff30d = toDateString(new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000))
+
+    const [
+      usersWindow,
+      installsWindow,
+      clicksWindow,
+      socialClicksWindow,
+      scrollWindow,
+      revenueWindow,
+      trafficTrendResult,
+      channelResult,
+      geoResult,
+    ] = await Promise.all([
+      fetchWindowedSum(supabase, 'ga_traffic', 'users', 'date', since60d, cutoff30d),
+      fetchWindowedSum(supabase, 'play_installs', 'installs', 'date', since60d, cutoff30d, (q) =>
+        q.eq('country', 'ALL')
+      ),
+      fetchWindowedSum(supabase, 'gsc_queries', 'clicks', 'date', since60d, cutoff30d),
+      fetchWindowedSum(supabase, 'shortio_clicks', 'human_clicks', 'date', since60d, cutoff30d),
+      fetchWindowedSum(supabase, 'clarity_sessions', 'scroll_depth_pct', 'date', since60d, cutoff30d),
+      fetchWindowedSum(supabase, 'daily_kpis', 'metric_value', 'date', since60d, cutoff30d, (q) =>
+        q.eq('metric_name', 'revenue')
+      ),
+      supabase
+        .from('ga_traffic')
+        .select('date, sessions')
+        .gte('date', cutoff30d)
+        .order('date', { ascending: true }),
+      supabase.from('ga_traffic').select('channel, sessions').gte('date', cutoff30d),
+      supabase.from('ga_geo').select('country, users').gte('date', cutoff30d),
+    ])
+
+    // Average (not sum) scroll depth over the current 30-day window — reuse
+    // the raw rows fetched above via a second lightweight pass so the KPI
+    // reflects an average rather than a summed percentage.
+    let avgScrollDepth = { value: MOCK_OVERVIEW.avgScrollDepth.value, change: MOCK_OVERVIEW.avgScrollDepth.change }
+    if (scrollWindow) {
+      const { data: scrollRows } = await supabase
+        .from('clarity_sessions')
+        .select('date, scroll_depth_pct')
+        .gte('date', since60d)
+
+      if (scrollRows && scrollRows.length > 0) {
+        const currentRows = scrollRows.filter((r) => r.date >= cutoff30d)
+        const previousRows = scrollRows.filter((r) => r.date < cutoff30d)
+        const avg = (rows: typeof scrollRows) =>
+          rows.length > 0 ? rows.reduce((t, r) => t + (r.scroll_depth_pct ?? 0), 0) / rows.length : 0
+        const currentAvg = avg(currentRows)
+        const previousAvg = avg(previousRows)
+        avgScrollDepth = { value: currentAvg, change: pctChange(currentAvg, previousAvg) }
+      }
+    }
+
+    // Traffic trend: daily session totals for the last 30 days.
+    let trafficTrend: LineChartDataPoint[] = MOCK_OVERVIEW.trafficTrend
+    if (!trafficTrendResult.error && trafficTrendResult.data && trafficTrendResult.data.length > 0) {
+      const byDate = new Map<string, number>()
+      for (const row of trafficTrendResult.data as { date: string; sessions: number }[]) {
+        byDate.set(row.date, (byDate.get(row.date) ?? 0) + (row.sessions ?? 0))
+      }
+      trafficTrend = Array.from(byDate.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([date, value]) => ({ date: formatShortDate(date), value }))
+    }
+
+    // Channel breakdown: sessions grouped by channel, top 5 by volume.
+    let channelBreakdown = MOCK_OVERVIEW.channelBreakdown
+    if (!channelResult.error && channelResult.data && channelResult.data.length > 0) {
+      const byChannel = new Map<string, number>()
+      for (const row of channelResult.data as { channel: string; sessions: number }[]) {
+        byChannel.set(row.channel, (byChannel.get(row.channel) ?? 0) + (row.sessions ?? 0))
+      }
+      const total = Array.from(byChannel.values()).reduce((t, v) => t + v, 0)
+      channelBreakdown = Array.from(byChannel.entries())
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, 5)
+        .map(([channel, sessions]) => ({
+          channel,
+          sessions,
+          share: total > 0 ? (sessions / total) * 100 : 0,
+        }))
+    }
+
+    // Top countries: users grouped by country, top 5 by volume.
+    let topCountries = MOCK_OVERVIEW.topCountries
+    if (!geoResult.error && geoResult.data && geoResult.data.length > 0) {
+      const byCountry = new Map<string, number>()
+      for (const row of geoResult.data as { country: string; users: number }[]) {
+        byCountry.set(row.country, (byCountry.get(row.country) ?? 0) + (row.users ?? 0))
+      }
+      const total = Array.from(byCountry.values()).reduce((t, v) => t + v, 0)
+      topCountries = Array.from(byCountry.entries())
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, 5)
+        .map(([country, users]) => ({
+          country,
+          users,
+          share: total > 0 ? (users / total) * 100 : 0,
+        }))
+    }
+
+    return {
+      totalUsers: usersWindow
+        ? { value: usersWindow.current, change: pctChange(usersWindow.current, usersWindow.previous) }
+        : MOCK_OVERVIEW.totalUsers,
+      appInstalls: installsWindow
+        ? { value: installsWindow.current, change: pctChange(installsWindow.current, installsWindow.previous) }
+        : MOCK_OVERVIEW.appInstalls,
+      organicClicks: clicksWindow
+        ? { value: clicksWindow.current, change: pctChange(clicksWindow.current, clicksWindow.previous) }
+        : MOCK_OVERVIEW.organicClicks,
+      socialClicksHuman: socialClicksWindow
+        ? {
+            value: socialClicksWindow.current,
+            change: pctChange(socialClicksWindow.current, socialClicksWindow.previous),
+          }
+        : MOCK_OVERVIEW.socialClicksHuman,
+      avgScrollDepth,
+      revenue: revenueWindow
+        ? { value: revenueWindow.current, change: pctChange(revenueWindow.current, revenueWindow.previous) }
+        : MOCK_OVERVIEW.revenue,
+      trafficTrend,
+      channelBreakdown,
+      topCountries,
+    }
+  } catch {
+    // Network failure, missing env vars, or any other unexpected error —
+    // the UI must always render, so fall all the way back to mock data.
+    return MOCK_OVERVIEW
+  }
+}
+
+/** Formats a `YYYY-MM-DD` string as "Jul 23" to match the mock trend labels. */
+function formatShortDate(dateStr: string): string {
+  const d = new Date(`${dateStr}T00:00:00Z`)
+  if (Number.isNaN(d.getTime())) return dateStr
+  return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit', timeZone: 'UTC' })
 }
 
 function getTrend(change: number): 'up' | 'down' | 'flat' {

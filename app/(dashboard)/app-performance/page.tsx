@@ -4,24 +4,26 @@ import AreaChart, { type AreaChartDataPoint } from '@/components/charts/AreaChar
 import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent, formatDate } from '@/lib/utils/format'
+import { createServiceClient } from '@/lib/supabase/server'
 
 // ---------------------------------------------------------------------------
 // Data fetching
 // ---------------------------------------------------------------------------
-// This is a Server Component. In production this would call the Google Play
-// Console reporting API (via lib/api-clients) and/or query the `play_install`
-// / `play_rating` / `play_store_listing` tables synced into Supabase, e.g.:
+// This is a Server Component. Reads the Google Play Console export synced
+// into Supabase: `play_installs` (daily install/uninstall/active-device
+// counts, worldwide row has country='ALL'), `play_ratings` (daily avg rating
+// + 1-5 star distribution), and `play_store_listing` (daily
+// impressions -> visits -> installs funnel). supabase-js doesn't support
+// server-side GROUP BY, so per-country aggregation happens client-side in JS.
 //
-//   import { createClient } from '@/lib/supabase/server'
-//   const supabase = createClient()
-//   const { data } = await supabase
-//     .from('play_install')
-//     .select('*')
-//     .order('date', { ascending: true })
-//     .limit(30)
+// NOTE: `play_ratings` has no crash_rate column and there's no other Play
+// Console table that tracks crashes, so crashRate stays mock-only — it's
+// carried through unchanged from MOCK_APP_PERFORMANCE_DATA regardless of
+// whether the rest of the page has real data.
 //
-// For now we return mock data so the UI structure can be reviewed before the
-// Play Console sync job is wired up.
+// Play Console data likely isn't synced yet, so the mock fallback here is
+// essential, not just defensive: if `play_installs` is empty, this function
+// returns MOCK_APP_PERFORMANCE_DATA in full.
 
 interface KPIMetric {
   value: number
@@ -67,19 +69,15 @@ interface AppPerformanceData {
   recentReviews: Review[]
 }
 
-async function getAppPerformanceData(): Promise<AppPerformanceData> {
-  // TODO: replace with real Google Play Console query once the sync job for
-  // `play_install` / `play_rating` / `play_store_listing` is live. Returning
-  // mock data in the same shape for now.
-  return {
-    totalInstalls: { value: 6320, change: 12.1 },
-    activeDevices: { value: 4180, change: 6.8 },
-    avgRating: { value: 4.2, change: 2.4 },
-    uninstallRate: { value: 18, change: -1.6 },
-    crashRate: { value: 1.2, change: -0.4 },
+const MOCK_APP_PERFORMANCE_DATA: AppPerformanceData = {
+  totalInstalls: { value: 6320, change: 12.1 },
+  activeDevices: { value: 4180, change: 6.8 },
+  avgRating: { value: 4.2, change: 2.4 },
+  uninstallRate: { value: 18, change: -1.6 },
+  crashRate: { value: 1.2, change: -0.4 },
 
-    // 30-day daily installs vs. uninstalls
-    installTrend: [
+  // 30-day daily installs vs. uninstalls
+  installTrend: [
       { date: 'Jun 24', value: 168, secondaryValue: 42 },
       { date: 'Jun 25', value: 172, secondaryValue: 38 },
       { date: 'Jun 26', value: 159, secondaryValue: 45 },
@@ -177,6 +175,141 @@ async function getAppPerformanceData(): Promise<AppPerformanceData> {
         reviewer: 'Faisal M.',
       },
     ],
+}
+
+function daysAgoISO(days: number): string {
+  const d = new Date()
+  d.setDate(d.getDate() - days)
+  return d.toISOString().slice(0, 10)
+}
+
+function formatTrendDate(dateStr: string): string {
+  const d = new Date(dateStr)
+  if (Number.isNaN(d.getTime())) return dateStr
+  return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' })
+}
+
+async function getAppPerformanceData(): Promise<AppPerformanceData> {
+  const supabase = createServiceClient()
+  const since = daysAgoISO(30)
+
+  const [installsRes, ratingsRes, storeListingRes] = await Promise.all([
+    supabase
+      .from('play_installs')
+      .select('date, installs, uninstalls, active_devices, update_installs, country')
+      .gte('date', since),
+    supabase
+      .from('play_ratings')
+      .select('date, avg_rating, total_ratings, star_1, star_2, star_3, star_4, star_5, reviews_count')
+      .order('date', { ascending: false })
+      .limit(1),
+    supabase
+      .from('play_store_listing')
+      .select('date, impressions, visits, installs, install_conversion_rate, country')
+      .gte('date', since),
+  ])
+
+  const installs = installsRes.data ?? []
+  const ratings = ratingsRes.data ?? []
+  const storeListing = storeListingRes.data ?? []
+
+  const hasInstalls = !installsRes.error && installs.length > 0
+
+  if (!hasInstalls) {
+    return MOCK_APP_PERFORMANCE_DATA
+  }
+
+  const worldwide = installs.filter((r) => r.country === 'ALL')
+  const perCountry = installs.filter((r) => r.country !== 'ALL')
+  const rows = worldwide.length > 0 ? worldwide : installs
+
+  const totalInstalls = rows.reduce((sum, r) => sum + (r.installs ?? 0), 0)
+  const totalUninstalls = rows.reduce((sum, r) => sum + (r.uninstalls ?? 0), 0)
+  const activeDevices = rows.length > 0 ? rows[rows.length - 1].active_devices ?? 0 : 0
+  const uninstallRate = totalInstalls > 0 ? (totalUninstalls / totalInstalls) * 100 : 0
+
+  // Day-over-day change: compare the most recent day to the prior day.
+  const sortedRows = [...rows].sort((a, b) => (a.date < b.date ? -1 : 1))
+  const latest = sortedRows[sortedRows.length - 1]
+  const previous = sortedRows.length > 1 ? sortedRows[sortedRows.length - 2] : null
+  const changePct = (current: number, prev: number | null | undefined): number => {
+    if (!prev) return 0
+    return ((current - prev) / prev) * 100
+  }
+
+  const latestRating = ratings[0]
+  const avgRating = latestRating?.avg_rating ?? MOCK_APP_PERFORMANCE_DATA.avgRating.value
+
+  const installTrend: AreaChartDataPoint[] = sortedRows.map((r) => ({
+    date: formatTrendDate(r.date),
+    value: r.installs ?? 0,
+    secondaryValue: r.uninstalls ?? 0,
+  }))
+
+  // Store listing funnel: sum impressions/visits/installs for the ALL
+  // (worldwide) rows across the window, falling back to all rows if no
+  // explicit worldwide aggregate exists.
+  const storeListingWorldwide = storeListing.filter((r) => r.country === 'ALL')
+  const storeListingRows = storeListingWorldwide.length > 0 ? storeListingWorldwide : storeListing
+  const totalImpressions = storeListingRows.reduce((sum, r) => sum + (r.impressions ?? 0), 0)
+  const totalVisits = storeListingRows.reduce((sum, r) => sum + (r.visits ?? 0), 0)
+  const totalStoreInstalls = storeListingRows.reduce((sum, r) => sum + (r.installs ?? 0), 0)
+
+  const storeFunnel: FunnelStep[] =
+    storeListingRows.length > 0
+      ? [
+          { label: 'Impressions', value: totalImpressions },
+          { label: 'Store Visits', value: totalVisits },
+          { label: 'Installs', value: totalStoreInstalls },
+        ]
+      : MOCK_APP_PERFORMANCE_DATA.storeFunnel
+
+  const ratingDistribution: RatingBucket[] = latestRating
+    ? [
+        { label: '5 star', value: latestRating.star_5 ?? 0 },
+        { label: '4 star', value: latestRating.star_4 ?? 0 },
+        { label: '3 star', value: latestRating.star_3 ?? 0 },
+        { label: '2 star', value: latestRating.star_2 ?? 0 },
+        { label: '1 star', value: latestRating.star_1 ?? 0 },
+      ]
+    : MOCK_APP_PERFORMANCE_DATA.ratingDistribution
+
+  // Top install countries: aggregate per-country rows across the window.
+  const byCountry = new Map<string, { installs: number; uninstalls: number; activeDevices: number }>()
+  for (const r of perCountry) {
+    const entry = byCountry.get(r.country) ?? { installs: 0, uninstalls: 0, activeDevices: 0 }
+    entry.installs += r.installs ?? 0
+    entry.uninstalls += r.uninstalls ?? 0
+    entry.activeDevices = Math.max(entry.activeDevices, r.active_devices ?? 0)
+    byCountry.set(r.country, entry)
+  }
+  const topCountries: CountryInstallRow[] = Array.from(byCountry.entries())
+    .map(([country, agg]) => ({
+      country,
+      installs: agg.installs,
+      uninstalls: agg.uninstalls,
+      netGrowth: agg.installs - agg.uninstalls,
+      activeDevices: agg.activeDevices,
+    }))
+    .sort((a, b) => b.installs - a.installs)
+    .slice(0, 10)
+
+  return {
+    totalInstalls: { value: totalInstalls, change: changePct(latest?.installs ?? 0, previous?.installs) },
+    activeDevices: {
+      value: activeDevices,
+      change: changePct(latest?.active_devices ?? 0, previous?.active_devices),
+    },
+    avgRating: { value: avgRating, change: MOCK_APP_PERFORMANCE_DATA.avgRating.change },
+    uninstallRate: { value: uninstallRate, change: MOCK_APP_PERFORMANCE_DATA.uninstallRate.change },
+    // No source table tracks app crashes — always mock.
+    crashRate: MOCK_APP_PERFORMANCE_DATA.crashRate,
+    installTrend: installTrend.length > 0 ? installTrend : MOCK_APP_PERFORMANCE_DATA.installTrend,
+    storeFunnel,
+    ratingDistribution,
+    topCountries: topCountries.length > 0 ? topCountries : MOCK_APP_PERFORMANCE_DATA.topCountries,
+    // No Play Console review-text table exists yet — always mock.
+    recentReviews: MOCK_APP_PERFORMANCE_DATA.recentReviews,
   }
 }
 

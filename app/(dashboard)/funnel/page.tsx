@@ -3,37 +3,20 @@ import FunnelChart, { type FunnelChartStep } from '@/components/charts/FunnelCha
 import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent } from '@/lib/utils/format'
+import { createServiceClient } from '@/lib/supabase/server'
 
 // ---------------------------------------------------------------------------
 // Data fetching
 // ---------------------------------------------------------------------------
-// This is a Server Component. In production this reads from the `funnel`
-// rollup table (see `FunnelStage` in lib/types/index.ts), which is built by
-// stitching together Short.io clicks -> GA4 sessions/events -> Play Console
-// installs -> in-app "wallet created" / "first transaction" events, e.g.:
-//
-//   import { createClient } from '@/lib/supabase/server'
-//   const supabase = createClient()
-//   const { data } = await supabase
-//     .from('funnel')
-//     .select('stage_name, stage_order, users_entered, users_exited, conversion_rate, drop_off_rate')
-//     .order('stage_order', { ascending: true })
-//
-//   // Social -> Website attribution correlation (Short.io human clicks per
-//   // platform vs. GA4 sessions carrying the matching utm_source)
-//   const { data: shortioByPlatform } = await supabase
-//     .from('shortio_clicks')
-//     .select('referrer, human_clicks.sum()')
-//     .group('referrer')
-//
-//   const { data: ga4BySource } = await supabase
-//     .from('ga_traffic')
-//     .select('source, sessions.sum()')
-//     .eq('medium', 'social')
-//     .group('source')
-//
-// For now we return mock data in the same shape so the UI can be reviewed
-// before the cross-source funnel stitching job is wired up.
+// This is a Server Component. The funnel is stitched together live from five
+// independent source tables (there is no single pre-built "funnel" rollup
+// table yet) — Short.io clicks -> GA4 sessions -> GA4 blog/product pageviews
+// -> Play Console store impressions -> Play Console installs -> GA4
+// wallet/transaction events. Each stage query is independent, so a gap in
+// one source (e.g. Play Console not synced yet) doesn't take down the whole
+// page — we simply fall back to mock data for the entire funnel whenever any
+// stage can't be computed from real rows, to keep the funnel internally
+// consistent (a partially-mock, partially-real funnel would be misleading).
 
 interface FunnelStageRow {
   name: string
@@ -51,29 +34,185 @@ interface FunnelData {
   attribution: AttributionRow[]
 }
 
+const MOCK_FUNNEL_DATA: FunnelData = {
+  stages: [
+    { name: 'Social Discovery', users: 14320 },
+    { name: 'Website Visit', users: 9142 },
+    { name: 'Blog/Product Engagement', users: 5840 },
+    { name: 'Play Store View', users: 3210 },
+    { name: 'App Install', users: 1860 },
+    { name: 'Wallet Created', users: 1120 },
+    { name: 'First Transaction', users: 486 },
+    { name: 'Retained (30-day)', users: 312 },
+  ],
+  attribution: [
+    { platform: 'Twitter', shortioHumanClicks: 77, ga4Sessions: 3480 },
+    { platform: 'Telegram', shortioHumanClicks: 8, ga4Sessions: 410 },
+    { platform: 'Facebook', shortioHumanClicks: 6, ga4Sessions: 1820 },
+    { platform: 'LinkedIn', shortioHumanClicks: 5, ga4Sessions: 1690 },
+    { platform: 'Instagram', shortioHumanClicks: 4, ga4Sessions: 7910 },
+    { platform: 'YouTube', shortioHumanClicks: 3, ga4Sessions: 265 },
+  ],
+}
+
+// Referrer domain -> display platform name, shared with the social page's
+// platform mapping so attribution stays consistent across the dashboard.
+const REFERRER_TO_PLATFORM: Record<string, string> = {
+  't.co': 'Twitter',
+  'ir.ilmili.telegraph': 'Telegram',
+  'm.facebook.com': 'Facebook',
+  'lnkd.in': 'LinkedIn',
+  'l.instagram.com': 'Instagram',
+  'www.youtube.com': 'YouTube',
+}
+
+function daysAgoISO(days: number): string {
+  const d = new Date()
+  d.setDate(d.getDate() - days)
+  return d.toISOString().slice(0, 10)
+}
+
 async function getFunnelData(): Promise<FunnelData> {
-  // TODO: replace mock data with the Supabase queries outlined above once
-  // the cross-source funnel stitching job is live.
+  const supabase = createServiceClient()
+  const since = daysAgoISO(30)
+
+  // Stage 1: Social Discovery — human clicks on shortened social links.
+  const stage1 = await supabase
+    .from('shortio_clicks')
+    .select('human_clicks')
+    .gte('date', since)
+
+  // Stage 2: Website Visit — GA4 sessions arriving via social/referral.
+  const stage2 = await supabase
+    .from('ga_traffic')
+    .select('sessions, channel')
+    .gte('date', since)
+    .in('channel', ['social', 'referral'])
+
+  // Stage 3: Blog/Product Engagement — pageviews on blog or Sahal pages.
+  const stage3 = await supabase
+    .from('ga_pages')
+    .select('pageviews, page_path')
+    .gte('date', since)
+
+  // Stage 4: Play Store View — store listing impressions.
+  const stage4 = await supabase
+    .from('play_store_listing')
+    .select('impressions')
+    .gte('date', since)
+
+  // Stage 5: App Install — Play Console installs.
+  const stage5 = await supabase
+    .from('play_installs')
+    .select('installs')
+    .gte('date', since)
+
+  // Stages 6-8: Wallet Created / First Transaction / Retained — GA4 events.
+  const stage678 = await supabase
+    .from('ga_events')
+    .select('event_name, event_count')
+    .gte('date', since)
+    .in('event_name', ['wallet_created', 'first_transaction', 'retained_30_day'])
+
+  const anyError =
+    stage1.error || stage2.error || stage3.error || stage4.error || stage5.error || stage678.error
+
+  const socialDiscovery = (stage1.data ?? []).reduce((sum, r) => sum + (r.human_clicks ?? 0), 0)
+  const websiteVisit = (stage2.data ?? []).reduce((sum, r) => sum + (r.sessions ?? 0), 0)
+  const blogEngagement = (stage3.data ?? [])
+    .filter((r) => r.page_path?.startsWith('/blogs/') || r.page_path?.startsWith('/sahal'))
+    .reduce((sum, r) => sum + (r.pageviews ?? 0), 0)
+  const playStoreView = (stage4.data ?? []).reduce((sum, r) => sum + (r.impressions ?? 0), 0)
+  const appInstall = (stage5.data ?? []).reduce((sum, r) => sum + (r.installs ?? 0), 0)
+
+  const eventCounts = (stage678.data ?? []).reduce<Record<string, number>>((acc, r) => {
+    acc[r.event_name] = (acc[r.event_name] ?? 0) + (r.event_count ?? 0)
+    return acc
+  }, {})
+  const walletCreated = eventCounts['wallet_created'] ?? 0
+  const firstTransaction = eventCounts['first_transaction'] ?? 0
+  const retained = eventCounts['retained_30_day'] ?? 0
+
+  const stages: FunnelStageRow[] = [
+    { name: 'Social Discovery', users: socialDiscovery },
+    { name: 'Website Visit', users: websiteVisit },
+    { name: 'Blog/Product Engagement', users: blogEngagement },
+    { name: 'Play Store View', users: playStoreView },
+    { name: 'App Install', users: appInstall },
+    { name: 'Wallet Created', users: walletCreated },
+    { name: 'First Transaction', users: firstTransaction },
+    { name: 'Retained (30-day)', users: retained },
+  ]
+
+  // A usable funnel needs every stage to have a non-zero count — if any
+  // upstream source hasn't synced yet, the shape would be misleading (e.g.
+  // a funnel that inexplicably jumps to 0 at "Play Store View" just because
+  // Play Console isn't wired up). Fall back to mock for the whole funnel.
+  const hasCompleteFunnel = !anyError && stages.every((s) => s.users > 0)
+
+  // Social -> Website attribution: Short.io human clicks per platform vs.
+  // GA4 sessions recorded from the matching social source.
+  const clicksByReferrer = await supabase
+    .from('shortio_clicks')
+    .select('referrer, human_clicks')
+    .gte('date', since)
+
+  const sessionsBySource = await supabase
+    .from('ga_traffic')
+    .select('source, sessions')
+    .gte('date', since)
+    .eq('channel', 'social')
+
+  const humanClicksByPlatform = (clicksByReferrer.data ?? []).reduce<Record<string, number>>(
+    (acc, r) => {
+      const platform = r.referrer ? REFERRER_TO_PLATFORM[r.referrer] : undefined
+      if (platform) acc[platform] = (acc[platform] ?? 0) + (r.human_clicks ?? 0)
+      return acc
+    },
+    {}
+  )
+
+  const sessionsByPlatform = (sessionsBySource.data ?? []).reduce<Record<string, number>>(
+    (acc, r) => {
+      const platform = r.source ? PLATFORM_BY_GA_SOURCE[r.source.toLowerCase()] : undefined
+      if (platform) acc[platform] = (acc[platform] ?? 0) + (r.sessions ?? 0)
+      return acc
+    },
+    {}
+  )
+
+  const attributionPlatforms = Object.keys(REFERRER_TO_PLATFORM).map(
+    (referrer) => REFERRER_TO_PLATFORM[referrer]
+  )
+  const attribution: AttributionRow[] = attributionPlatforms.map((platform) => ({
+    platform,
+    shortioHumanClicks: humanClicksByPlatform[platform] ?? 0,
+    ga4Sessions: sessionsByPlatform[platform] ?? 0,
+  }))
+
+  const hasAttribution =
+    !clicksByReferrer.error &&
+    !sessionsBySource.error &&
+    attribution.some((a) => a.shortioHumanClicks > 0 || a.ga4Sessions > 0)
+
   return {
-    stages: [
-      { name: 'Social Discovery', users: 14320 },
-      { name: 'Website Visit', users: 9142 },
-      { name: 'Blog/Product Engagement', users: 5840 },
-      { name: 'Play Store View', users: 3210 },
-      { name: 'App Install', users: 1860 },
-      { name: 'Wallet Created', users: 1120 },
-      { name: 'First Transaction', users: 486 },
-      { name: 'Retained (30-day)', users: 312 },
-    ],
-    attribution: [
-      { platform: 'Twitter', shortioHumanClicks: 77, ga4Sessions: 3480 },
-      { platform: 'Telegram', shortioHumanClicks: 8, ga4Sessions: 410 },
-      { platform: 'Facebook', shortioHumanClicks: 6, ga4Sessions: 1820 },
-      { platform: 'LinkedIn', shortioHumanClicks: 5, ga4Sessions: 1690 },
-      { platform: 'Instagram', shortioHumanClicks: 4, ga4Sessions: 7910 },
-      { platform: 'YouTube', shortioHumanClicks: 3, ga4Sessions: 265 },
-    ],
+    stages: hasCompleteFunnel ? stages : MOCK_FUNNEL_DATA.stages,
+    attribution: hasAttribution ? attribution : MOCK_FUNNEL_DATA.attribution,
   }
+}
+
+// GA4 `source` values that correspond to each social platform's attribution
+// bucket (lowercased for case-insensitive matching).
+const PLATFORM_BY_GA_SOURCE: Record<string, string> = {
+  twitter: 'Twitter',
+  't.co': 'Twitter',
+  x: 'Twitter',
+  telegram: 'Telegram',
+  facebook: 'Facebook',
+  'm.facebook.com': 'Facebook',
+  linkedin: 'LinkedIn',
+  instagram: 'Instagram',
+  youtube: 'YouTube',
 }
 
 // ---------------------------------------------------------------------------

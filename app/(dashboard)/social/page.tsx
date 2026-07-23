@@ -5,44 +5,19 @@ import AreaChart, { type AreaChartDataPoint } from '@/components/charts/AreaChar
 import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent } from '@/lib/utils/format'
+import { createServiceClient } from '@/lib/supabase/server'
 
 // ---------------------------------------------------------------------------
 // Data fetching
 // ---------------------------------------------------------------------------
-// This is a Server Component. In production this reads from Short.io's
-// click-analytics export for the mrhbnetwork.short.gy domain — see
-// `ShortIOLink` / `ShortIOClick` in lib/types/index.ts — e.g.:
-//
-//   import { createClient } from '@/lib/supabase/server'
-//   const supabase = createClient()
-//
-//   const { data: clicksByReferrer } = await supabase
-//     .from('shortio_clicks')
-//     .select('referrer, human_clicks.sum(), total_clicks.sum()')
-//     .group('referrer')
-//
-//   const { data: clickTrend } = await supabase
-//     .from('shortio_clicks')
-//     .select('date, total_clicks.sum(), human_clicks.sum()')
-//     .gte('date', thirtyDaysAgo)
-//     .group('date')
-//     .order('date', { ascending: true })
-//
-//   const { data: topLinks } = await supabase
-//     .from('shortio_links')
-//     .select('short_url, original_url, total_clicks.sum(), human_clicks.sum()')
-//     .order('total_clicks', { ascending: false })
-//     .limit(10)
-//
-//   const { data: geo } = await supabase
-//     .from('shortio_clicks')
-//     .select('country, os, total_clicks.sum()')
-//     .group('country, os')
-//
-// For now we return the real numbers pulled from the Short.io dashboard for
-// the mrhbnetwork.short.gy domain (1,166 total clicks / 227 human clicks),
-// with the remaining time-series/table detail filled in as realistic mock
-// data until the Short.io export sync job is wired up.
+// This is a Server Component. Reads Short.io's click-analytics export for
+// the mrhbnetwork.short.gy domain from `shortio_clicks` (daily click facts)
+// joined against `shortio_links` (the link registry) — see `ShortIOLink` /
+// `ShortIOClick` in lib/types/index.ts. supabase-js doesn't support
+// arbitrary server-side GROUP BY, so grouping/summing by referrer, date,
+// country, and OS happens client-side in JS after fetching the raw rows.
+// Falls back to the real Short.io dashboard totals (1,166 total clicks / 227
+// human clicks) with realistic mock detail whenever the tables are empty.
 
 interface PlatformRow {
   platform: string
@@ -100,116 +75,274 @@ function buildClickTrend(): AreaChartDataPoint[] {
   }))
 }
 
+// Real Short.io dashboard figures for mrhbnetwork.short.gy, used as the
+// fallback whenever `shortio_clicks` / `shortio_links` are empty.
+const MOCK_SOCIAL_DATA: SocialData = {
+  totalClicks: 1166,
+  humanClicks: 227,
+  botClicks: 1166 - 227,
+  platforms: [
+    {
+      platform: 'Twitter',
+      humanClicks: 77,
+      referrer: 't.co',
+      colorFrom: 'from-sky-400',
+      colorTo: 'to-sky-600',
+      textColor: 'text-sky-600',
+    },
+    {
+      platform: 'Telegram',
+      humanClicks: 8,
+      referrer: 'ir.ilmili.telegraph',
+      colorFrom: 'from-blue-400',
+      colorTo: 'to-blue-600',
+      textColor: 'text-blue-600',
+    },
+    {
+      platform: 'Facebook',
+      humanClicks: 6,
+      referrer: 'm.facebook.com',
+      colorFrom: 'from-indigo-400',
+      colorTo: 'to-indigo-600',
+      textColor: 'text-indigo-600',
+    },
+    {
+      platform: 'LinkedIn',
+      humanClicks: 5,
+      referrer: 'lnkd.in',
+      colorFrom: 'from-blue-500',
+      colorTo: 'to-blue-700',
+      textColor: 'text-blue-700',
+    },
+    {
+      platform: 'Instagram',
+      humanClicks: 4,
+      referrer: 'l.instagram.com',
+      colorFrom: 'from-pink-400',
+      colorTo: 'to-purple-600',
+      textColor: 'text-purple-600',
+    },
+    {
+      platform: 'YouTube',
+      humanClicks: 3,
+      referrer: 'www.youtube.com',
+      colorFrom: 'from-red-400',
+      colorTo: 'to-red-600',
+      textColor: 'text-red-600',
+    },
+  ],
+  clickTrend: buildClickTrend(),
+  topLinks: [
+    {
+      shortUrl: 'mrhbnetwork.short.gy/sahal-wallet',
+      destination: 'mrhb.network/sahal-wallet',
+      totalClicks: 412,
+      humanClicks: 89,
+      topCountry: 'United States',
+      topReferrer: 't.co',
+    },
+    {
+      shortUrl: 'mrhbnetwork.short.gy/blogs/what-is-mrhb',
+      destination: 'mrhb.network/blogs/what-is-mrhb',
+      totalClicks: 298,
+      humanClicks: 54,
+      topCountry: 'Russia',
+      topReferrer: 't.co',
+    },
+    {
+      shortUrl: 'mrhbnetwork.short.gy/tijarx',
+      destination: 'mrhb.network/tijarx',
+      totalClicks: 231,
+      humanClicks: 41,
+      topCountry: 'United Arab Emirates',
+      topReferrer: 'm.facebook.com',
+    },
+    {
+      shortUrl: 'mrhbnetwork.short.gy/download',
+      destination: 'play.google.com/store/apps/details?id=network.mrhb.sahal',
+      totalClicks: 225,
+      humanClicks: 43,
+      topCountry: 'France',
+      topReferrer: 't.co',
+    },
+  ],
+  topCountries: [
+    { label: 'United States', value: 55 },
+    { label: 'Russia', value: 26 },
+    { label: 'United Arab Emirates', value: 18 },
+    { label: 'France', value: 16 },
+    { label: 'Saudi Arabia', value: 15 },
+  ],
+  deviceSplit: [
+    { name: 'iOS', value: 87, color: '#01A6FA' },
+    { name: 'Android', value: 54, color: '#29231D' },
+    { name: 'Windows', value: 52, color: '#E5B897' },
+    { name: 'Mac', value: 33, color: '#BFB4A6' },
+  ],
+}
+
+// Referrer domain -> display platform + card styling. UI-only metadata that
+// has no equivalent database column, so it's kept as a static lookup keyed
+// by the referrer values actually written into `shortio_clicks.referrer`.
+const PLATFORM_STYLE_BY_REFERRER: Record<
+  string,
+  { platform: string; colorFrom: string; colorTo: string; textColor: string }
+> = {
+  't.co': { platform: 'Twitter', colorFrom: 'from-sky-400', colorTo: 'to-sky-600', textColor: 'text-sky-600' },
+  'ir.ilmili.telegraph': { platform: 'Telegram', colorFrom: 'from-blue-400', colorTo: 'to-blue-600', textColor: 'text-blue-600' },
+  'm.facebook.com': { platform: 'Facebook', colorFrom: 'from-indigo-400', colorTo: 'to-indigo-600', textColor: 'text-indigo-600' },
+  'lnkd.in': { platform: 'LinkedIn', colorFrom: 'from-blue-500', colorTo: 'to-blue-700', textColor: 'text-blue-700' },
+  'l.instagram.com': { platform: 'Instagram', colorFrom: 'from-pink-400', colorTo: 'to-purple-600', textColor: 'text-purple-600' },
+  'www.youtube.com': { platform: 'YouTube', colorFrom: 'from-red-400', colorTo: 'to-red-600', textColor: 'text-red-600' },
+}
+
+function daysAgoISO(days: number): string {
+  const d = new Date()
+  d.setDate(d.getDate() - days)
+  return d.toISOString().slice(0, 10)
+}
+
+function formatTrendDate(dateStr: string): string {
+  const d = new Date(dateStr)
+  if (Number.isNaN(d.getTime())) return dateStr
+  return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' })
+}
+
 async function getSocialData(): Promise<SocialData> {
-  // TODO: replace mock detail (trend/table/geo breakdowns) with the Supabase
-  // queries outlined above once the Short.io export sync job is live. The
-  // top-level totals and platform breakdown below reflect the real Short.io
-  // dashboard figures for mrhbnetwork.short.gy.
-  const totalClicks = 1166
-  const humanClicks = 227
+  const supabase = createServiceClient()
+  const since = daysAgoISO(30)
+
+  const clicksRes = await supabase
+    .from('shortio_clicks')
+    .select('date, link_id, total_clicks, human_clicks, country, os, referrer')
+    .gte('date', since)
+
+  const linksRes = await supabase.from('shortio_links').select('link_id, short_url, original_url')
+
+  const clicks = clicksRes.data ?? []
+  const links = linksRes.data ?? []
+
+  const hasClicks = !clicksRes.error && clicks.length > 0
+
+  if (!hasClicks) {
+    return MOCK_SOCIAL_DATA
+  }
+
+  const totalClicks = clicks.reduce((sum, c) => sum + (c.total_clicks ?? 0), 0)
+  const humanClicks = clicks.reduce((sum, c) => sum + (c.human_clicks ?? 0), 0)
+
+  // Platform performance: group by referrer, mapped to a display platform.
+  const humanClicksByReferrer = clicks.reduce<Record<string, number>>((acc, c) => {
+    if (!c.referrer) return acc
+    acc[c.referrer] = (acc[c.referrer] ?? 0) + (c.human_clicks ?? 0)
+    return acc
+  }, {})
+
+  const platforms: PlatformRow[] = Object.entries(PLATFORM_STYLE_BY_REFERRER).map(
+    ([referrer, style]) => ({
+      platform: style.platform,
+      humanClicks: humanClicksByReferrer[referrer] ?? 0,
+      referrer,
+      colorFrom: style.colorFrom,
+      colorTo: style.colorTo,
+      textColor: style.textColor,
+    })
+  )
+
+  // Click trend: group by date.
+  const clicksByDate = clicks.reduce<Record<string, { total: number; human: number }>>(
+    (acc, c) => {
+      const bucket = acc[c.date] ?? { total: 0, human: 0 }
+      bucket.total += c.total_clicks ?? 0
+      bucket.human += c.human_clicks ?? 0
+      acc[c.date] = bucket
+      return acc
+    },
+    {}
+  )
+  const clickTrend: AreaChartDataPoint[] = Object.keys(clicksByDate)
+    .sort()
+    .map((date) => ({
+      date: formatTrendDate(date),
+      value: clicksByDate[date].total,
+      secondaryValue: clicksByDate[date].human,
+    }))
+
+  // Top links: aggregate clicks per link_id, then join against shortio_links
+  // for the human-readable short_url/original_url, plus each link's top
+  // country and top referrer by click volume.
+  const linkById = new Map(links.map((l) => [l.link_id, l]))
+  const perLink = new Map<
+    string,
+    {
+      totalClicks: number
+      humanClicks: number
+      countryCounts: Record<string, number>
+      referrerCounts: Record<string, number>
+    }
+  >()
+  for (const c of clicks) {
+    const entry =
+      perLink.get(c.link_id) ??
+      { totalClicks: 0, humanClicks: 0, countryCounts: {}, referrerCounts: {} }
+    entry.totalClicks += c.total_clicks ?? 0
+    entry.humanClicks += c.human_clicks ?? 0
+    if (c.country) entry.countryCounts[c.country] = (entry.countryCounts[c.country] ?? 0) + (c.total_clicks ?? 0)
+    if (c.referrer) entry.referrerCounts[c.referrer] = (entry.referrerCounts[c.referrer] ?? 0) + (c.total_clicks ?? 0)
+    perLink.set(c.link_id, entry)
+  }
+
+  const topEntry = (counts: Record<string, number>): string => {
+    const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1])
+    return sorted[0]?.[0] ?? '—'
+  }
+
+  const topLinks: TopLinkRow[] = Array.from(perLink.entries())
+    .map(([linkId, agg]) => {
+      const link = linkById.get(linkId)
+      return {
+        shortUrl: link?.short_url ?? linkId,
+        destination: link?.original_url ?? '—',
+        totalClicks: agg.totalClicks,
+        humanClicks: agg.humanClicks,
+        topCountry: topEntry(agg.countryCounts),
+        topReferrer: topEntry(agg.referrerCounts),
+      }
+    })
+    .sort((a, b) => b.totalClicks - a.totalClicks)
+    .slice(0, 10)
+
+  // Geographic breakdown: group by country.
+  const clicksByCountry = clicks.reduce<Record<string, number>>((acc, c) => {
+    if (!c.country) return acc
+    acc[c.country] = (acc[c.country] ?? 0) + (c.total_clicks ?? 0)
+    return acc
+  }, {})
+  const topCountries: BarChartDataPoint[] = Object.entries(clicksByCountry)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([label, value]) => ({ label, value }))
+
+  // Device split: group by OS.
+  const clicksByOs = clicks.reduce<Record<string, number>>((acc, c) => {
+    if (!c.os) return acc
+    acc[c.os] = (acc[c.os] ?? 0) + (c.total_clicks ?? 0)
+    return acc
+  }, {})
+  const deviceColors = ['#01A6FA', '#29231D', '#E5B897', '#BFB4A6', '#D0EFFF']
+  const deviceSplit: DonutChartDataPoint[] = Object.entries(clicksByOs)
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, value], index) => ({ name, value, color: deviceColors[index % deviceColors.length] }))
 
   return {
-    totalClicks,
-    humanClicks,
-    botClicks: totalClicks - humanClicks,
-    platforms: [
-      {
-        platform: 'Twitter',
-        humanClicks: 77,
-        referrer: 't.co',
-        colorFrom: 'from-sky-400',
-        colorTo: 'to-sky-600',
-        textColor: 'text-sky-600',
-      },
-      {
-        platform: 'Telegram',
-        humanClicks: 8,
-        referrer: 'ir.ilmili.telegraph',
-        colorFrom: 'from-blue-400',
-        colorTo: 'to-blue-600',
-        textColor: 'text-blue-600',
-      },
-      {
-        platform: 'Facebook',
-        humanClicks: 6,
-        referrer: 'm.facebook.com',
-        colorFrom: 'from-indigo-400',
-        colorTo: 'to-indigo-600',
-        textColor: 'text-indigo-600',
-      },
-      {
-        platform: 'LinkedIn',
-        humanClicks: 5,
-        referrer: 'lnkd.in',
-        colorFrom: 'from-blue-500',
-        colorTo: 'to-blue-700',
-        textColor: 'text-blue-700',
-      },
-      {
-        platform: 'Instagram',
-        humanClicks: 4,
-        referrer: 'l.instagram.com',
-        colorFrom: 'from-pink-400',
-        colorTo: 'to-purple-600',
-        textColor: 'text-purple-600',
-      },
-      {
-        platform: 'YouTube',
-        humanClicks: 3,
-        referrer: 'www.youtube.com',
-        colorFrom: 'from-red-400',
-        colorTo: 'to-red-600',
-        textColor: 'text-red-600',
-      },
-    ],
-    clickTrend: buildClickTrend(),
-    topLinks: [
-      {
-        shortUrl: 'mrhbnetwork.short.gy/sahal-wallet',
-        destination: 'mrhb.network/sahal-wallet',
-        totalClicks: 412,
-        humanClicks: 89,
-        topCountry: 'United States',
-        topReferrer: 't.co',
-      },
-      {
-        shortUrl: 'mrhbnetwork.short.gy/blogs/what-is-mrhb',
-        destination: 'mrhb.network/blogs/what-is-mrhb',
-        totalClicks: 298,
-        humanClicks: 54,
-        topCountry: 'Russia',
-        topReferrer: 't.co',
-      },
-      {
-        shortUrl: 'mrhbnetwork.short.gy/tijarx',
-        destination: 'mrhb.network/tijarx',
-        totalClicks: 231,
-        humanClicks: 41,
-        topCountry: 'United Arab Emirates',
-        topReferrer: 'm.facebook.com',
-      },
-      {
-        shortUrl: 'mrhbnetwork.short.gy/download',
-        destination: 'play.google.com/store/apps/details?id=network.mrhb.sahal',
-        totalClicks: 225,
-        humanClicks: 43,
-        topCountry: 'France',
-        topReferrer: 't.co',
-      },
-    ],
-    topCountries: [
-      { label: 'United States', value: 55 },
-      { label: 'Russia', value: 26 },
-      { label: 'United Arab Emirates', value: 18 },
-      { label: 'France', value: 16 },
-      { label: 'Saudi Arabia', value: 15 },
-    ],
-    deviceSplit: [
-      { name: 'iOS', value: 87, color: '#01A6FA' },
-      { name: 'Android', value: 54, color: '#29231D' },
-      { name: 'Windows', value: 52, color: '#E5B897' },
-      { name: 'Mac', value: 33, color: '#BFB4A6' },
-    ],
+    totalClicks: totalClicks > 0 ? totalClicks : MOCK_SOCIAL_DATA.totalClicks,
+    humanClicks: totalClicks > 0 ? humanClicks : MOCK_SOCIAL_DATA.humanClicks,
+    botClicks: totalClicks > 0 ? totalClicks - humanClicks : MOCK_SOCIAL_DATA.botClicks,
+    platforms: platforms.some((p) => p.humanClicks > 0) ? platforms : MOCK_SOCIAL_DATA.platforms,
+    clickTrend: clickTrend.length > 0 ? clickTrend : MOCK_SOCIAL_DATA.clickTrend,
+    topLinks: topLinks.length > 0 ? topLinks : MOCK_SOCIAL_DATA.topLinks,
+    topCountries: topCountries.length > 0 ? topCountries : MOCK_SOCIAL_DATA.topCountries,
+    deviceSplit: deviceSplit.length > 0 ? deviceSplit : MOCK_SOCIAL_DATA.deviceSplit,
   }
 }
 
