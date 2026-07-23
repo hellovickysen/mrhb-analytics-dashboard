@@ -78,7 +78,8 @@ export interface GA4EventRow {
   event_name: string
   event_count: number
   users: number
-  conversions: number
+  event_value: number | null
+  is_conversion: boolean
 }
 
 /** Row shape matching the `ga_geo` table. */
@@ -307,7 +308,7 @@ export async function fetchGA4Events(
     const rows = await runPaginatedReport(client, property, {
       dateRanges: [{ startDate, endDate }],
       dimensions: [{ name: 'date' }, { name: 'eventName' }],
-      metrics: [{ name: 'eventCount' }, { name: 'totalUsers' }, { name: 'conversions' }],
+      metrics: [{ name: 'eventCount' }, { name: 'totalUsers' }, { name: 'eventValue' }],
     })
 
     return rows.map((row): GA4EventRow => ({
@@ -315,7 +316,8 @@ export async function fetchGA4Events(
       event_name: dim(row, 1) || '(not set)',
       event_count: toNumber(metric(row, 0)),
       users: toNumber(metric(row, 1)),
-      conversions: toNumber(metric(row, 2)),
+      event_value: toNumber(metric(row, 2)) || null,
+      is_conversion: false,
     }))
   } catch (error) {
     console.error('[google-analytics] fetchGA4Events failed:', error)
