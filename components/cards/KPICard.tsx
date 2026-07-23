@@ -16,6 +16,10 @@ import {
   Filter,
   Settings,
   Globe,
+  Clock,
+  Trophy,
+  AlertTriangle,
+  Repeat,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -36,6 +40,10 @@ const ICON_MAP: Record<string, LucideIcon> = {
   filter: Filter,
   settings: Settings,
   globe: Globe,
+  clock: Clock,
+  trophy: Trophy,
+  'alert-triangle': AlertTriangle,
+  repeat: Repeat,
 }
 
 interface KPICardProps {
