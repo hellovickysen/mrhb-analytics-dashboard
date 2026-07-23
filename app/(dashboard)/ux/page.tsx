@@ -5,6 +5,7 @@ import DonutChart, { type DonutChartDataPoint } from '@/components/charts/DonutC
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatPercent, formatDuration } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
+import { getDateWindow } from '@/lib/utils/date-range'
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -98,21 +99,15 @@ function average(values: number[]): number {
   return values.reduce((sum, v) => sum + v, 0) / values.length
 }
 
-function daysAgoISO(days: number): string {
-  const d = new Date()
-  d.setDate(d.getDate() - days)
-  return d.toISOString().slice(0, 10)
-}
-
 function formatTrendDate(dateStr: string): string {
   const d = new Date(dateStr)
   if (Number.isNaN(d.getTime())) return dateStr
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
-async function getUXData(): Promise<UXData> {
+async function getUXData(searchParams?: { range?: string }): Promise<UXData> {
   const supabase = createServiceClient()
-  const since = daysAgoISO(30)
+  const { startDate: since } = getDateWindow(searchParams)
 
   const sessionsRes = await supabase
     .from('clarity_sessions')
@@ -287,8 +282,12 @@ const frictionColumns: DataTableColumn[] = [
   { key: 'activeTime', label: 'Active Time', sortable: true, align: 'right' },
 ]
 
-export default async function UXPage() {
-  const data = await getUXData()
+export default async function UXPage({
+  searchParams,
+}: {
+  searchParams: { range?: string }
+}) {
+  const data = await getUXData(searchParams)
 
   const engagementRatioPct = (data.activeTime.value / data.totalTimeSec) * 100
 

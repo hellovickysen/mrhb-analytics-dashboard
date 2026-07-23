@@ -6,6 +6,7 @@ import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
+import { getDateWindow } from '@/lib/utils/date-range'
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -148,12 +149,6 @@ const MOCK_REVENUE_DATA: RevenueData = {
     ],
 }
 
-function daysAgoISO(days: number): string {
-  const d = new Date()
-  d.setDate(d.getDate() - days)
-  return d.toISOString().slice(0, 10)
-}
-
 function monthsAgoISO(months: number): string {
   const d = new Date()
   d.setMonth(d.getMonth() - months)
@@ -175,9 +170,9 @@ function formatMonthLabel(dateStr: string): string {
 
 const PRODUCT_COLORS = ['#01A6FA', '#29231D', '#E5B897', '#BFB4A6', '#D0EFFF', '#7DD3FC']
 
-async function getRevenueData(): Promise<RevenueData> {
+async function getRevenueData(searchParams?: { range?: string }): Promise<RevenueData> {
   const supabase = createServiceClient()
-  const since30d = daysAgoISO(30)
+  const { startDate: since30d, prevStartDate: since60d } = getDateWindow(searchParams)
   const since6mo = monthsAgoISO(6)
 
   const [revenueRes, transactionsRes] = await Promise.all([
@@ -209,8 +204,7 @@ async function getRevenueData(): Promise<RevenueData> {
     ? transactions30d.reduce((sum, t) => sum + (t.total_value ?? 0), 0) / transactionCount
     : 0
 
-  // Revenue growth: this 30-day window vs. the preceding 30-day window.
-  const since60d = daysAgoISO(60)
+  // Revenue growth: this window vs. the preceding window of equal length.
   const priorWindowRevenue = allRevenue.filter((r) => r.date >= since60d && r.date < since30d)
   const priorTotal = priorWindowRevenue.reduce((sum, r) => sum + (r.amount ?? 0), 0)
   const revenueGrowth = priorTotal > 0 ? ((totalRevenue - priorTotal) / priorTotal) * 100 : 0
@@ -321,8 +315,12 @@ const COUNTRY_REVENUE_COLUMNS: DataTableColumn[] = [
   { key: 'avgValue', label: 'Avg Value', align: 'right', sortable: true },
 ]
 
-export default async function RevenuePage() {
-  const data = await getRevenueData()
+export default async function RevenuePage({
+  searchParams,
+}: {
+  searchParams: { range?: string }
+}) {
+  const data = await getRevenueData(searchParams)
 
   const donutData: DonutChartDataPoint[] = data.revenueByProduct.map((p) => ({
     name: p.name,

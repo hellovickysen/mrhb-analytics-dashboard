@@ -1,15 +1,13 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter, useSearchParams, usePathname } from 'next/navigation'
 import { RefreshCw } from 'lucide-react'
 
 export type DateRange = '7d' | '30d' | '90d'
 
 interface HeaderProps {
   title: string
-  onDateRangeChange?: (range: DateRange) => void
-  onRefresh?: () => void | Promise<void>
-  defaultRange?: DateRange
 }
 
 const RANGE_OPTIONS: { label: string; value: DateRange }[] = [
@@ -18,29 +16,26 @@ const RANGE_OPTIONS: { label: string; value: DateRange }[] = [
   { label: '90d', value: '90d' },
 ]
 
-export default function Header({
-  title,
-  onDateRangeChange,
-  onRefresh,
-  defaultRange = '30d',
-}: HeaderProps) {
-  const [activeRange, setActiveRange] = useState<DateRange>(defaultRange)
+export default function Header({ title }: HeaderProps) {
+  const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const activeRange = (searchParams.get('range') as DateRange) || '30d'
   const [isRefreshing, setIsRefreshing] = useState(false)
 
   const handleRangeClick = (range: DateRange) => {
-    setActiveRange(range)
-    onDateRangeChange?.(range)
+    const params = new URLSearchParams(searchParams.toString())
+    params.set('range', range)
+    router.push(`${pathname}?${params.toString()}`)
   }
 
   const handleRefresh = async () => {
     if (isRefreshing) return
     setIsRefreshing(true)
     try {
-      await onRefresh?.()
+      router.refresh()
     } finally {
-      // Keep the spinner visible briefly even for instant refreshes,
-      // so the interaction always feels acknowledged.
-      setTimeout(() => setIsRefreshing(false), 600)
+      setTimeout(() => setIsRefreshing(false), 1000)
     }
   }
 
@@ -49,7 +44,7 @@ export default function Header({
       <h1 className="text-2xl font-semibold text-mrhb-dark">{title}</h1>
 
       <div className="flex items-center gap-3">
-        {/* Date range picker */}
+        {/* Date range picker — updates URL search params */}
         <div className="flex items-center rounded-lg border border-mrhb-warm-grey/30 bg-mrhb-white p-1">
           {RANGE_OPTIONS.map((option) => (
             <button
@@ -78,7 +73,7 @@ export default function Header({
             size={16}
             className={isRefreshing ? 'animate-spin text-mrhb-blue' : ''}
           />
-          {isRefreshing ? 'Refreshing…' : 'Refresh'}
+          {isRefreshing ? 'Refreshing...' : 'Refresh'}
         </button>
       </div>
     </div>

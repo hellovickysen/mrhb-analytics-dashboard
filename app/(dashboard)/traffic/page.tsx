@@ -6,6 +6,7 @@ import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent, formatDuration } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
+import { getDateWindow } from '@/lib/utils/date-range'
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -136,11 +137,6 @@ const MOCK_TRAFFIC: TrafficData = {
   ],
 }
 
-/** YYYY-MM-DD (UTC), matching Postgres `date` columns. */
-function toDateString(d: Date): string {
-  return d.toISOString().slice(0, 10)
-}
-
 /** Percent change of `current` vs `previous`, guarding divide-by-zero. */
 function pctChange(current: number, previous: number): number {
   if (!previous) return current > 0 ? 100 : 0
@@ -175,13 +171,13 @@ interface GAGeoWindowRow {
   os: string | null
 }
 
-async function getTrafficData(): Promise<TrafficData> {
+async function getTrafficData(searchParams?: { range?: string }): Promise<TrafficData> {
   try {
     const supabase = createServiceClient()
 
-    const now = new Date()
-    const since60d = toDateString(new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000))
-    const cutoff30d = toDateString(new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000))
+    const { startDate, prevStartDate } = getDateWindow(searchParams)
+    const since60d = prevStartDate
+    const cutoff30d = startDate
 
     const [trafficResult, geoResult] = await Promise.all([
       supabase
@@ -391,8 +387,12 @@ const browserOsColumns: DataTableColumn[] = [
   { key: 'avgSessionDuration', label: 'Avg Session', sortable: true, align: 'right' },
 ]
 
-export default async function TrafficPage() {
-  const data = await getTrafficData()
+export default async function TrafficPage({
+  searchParams,
+}: {
+  searchParams: { range?: string }
+}) {
+  const data = await getTrafficData(searchParams)
 
   const sourceRows = data.topSources.map((row) => ({
     source: row.source,

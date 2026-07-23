@@ -5,6 +5,7 @@ import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent, formatDate } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
+import { getDateWindow } from '@/lib/utils/date-range'
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -177,21 +178,15 @@ const MOCK_APP_PERFORMANCE_DATA: AppPerformanceData = {
     ],
 }
 
-function daysAgoISO(days: number): string {
-  const d = new Date()
-  d.setDate(d.getDate() - days)
-  return d.toISOString().slice(0, 10)
-}
-
 function formatTrendDate(dateStr: string): string {
   const d = new Date(dateStr)
   if (Number.isNaN(d.getTime())) return dateStr
   return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' })
 }
 
-async function getAppPerformanceData(): Promise<AppPerformanceData> {
+async function getAppPerformanceData(searchParams?: { range?: string }): Promise<AppPerformanceData> {
   const supabase = createServiceClient()
-  const since = daysAgoISO(30)
+  const { startDate: since } = getDateWindow(searchParams)
 
   const [installsRes, ratingsRes, storeListingRes] = await Promise.all([
     supabase
@@ -369,8 +364,12 @@ const COUNTRY_COLUMNS: DataTableColumn[] = [
   { key: 'activeDevices', label: 'Active Devices', align: 'right', sortable: true },
 ]
 
-export default async function AppPerformancePage() {
-  const data = await getAppPerformanceData()
+export default async function AppPerformancePage({
+  searchParams,
+}: {
+  searchParams: { range?: string }
+}) {
+  const data = await getAppPerformanceData(searchParams)
   const funnelBars = buildFunnelBars(data.storeFunnel)
   const conversionRates = funnelConversionRates(data.storeFunnel)
 

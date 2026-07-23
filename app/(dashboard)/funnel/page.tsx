@@ -4,6 +4,7 @@ import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
+import { getDateWindow } from '@/lib/utils/date-range'
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -66,15 +67,9 @@ const REFERRER_TO_PLATFORM: Record<string, string> = {
   'www.youtube.com': 'YouTube',
 }
 
-function daysAgoISO(days: number): string {
-  const d = new Date()
-  d.setDate(d.getDate() - days)
-  return d.toISOString().slice(0, 10)
-}
-
-async function getFunnelData(): Promise<FunnelData> {
+async function getFunnelData(searchParams?: { range?: string }): Promise<FunnelData> {
   const supabase = createServiceClient()
-  const since = daysAgoISO(30)
+  const { startDate: since } = getDateWindow(searchParams)
 
   // Stage 1: Social Discovery — human clicks on shortened social links.
   const stage1 = await supabase
@@ -307,8 +302,12 @@ const stageColumns: DataTableColumn[] = [
   { key: 'dropOffRate', label: 'Drop-off Rate', sortable: true, align: 'right' },
 ]
 
-export default async function FunnelPage() {
-  const data = await getFunnelData()
+export default async function FunnelPage({
+  searchParams,
+}: {
+  searchParams: { range?: string }
+}) {
+  const data = await getFunnelData(searchParams)
   const enrichedStages = enrichStages(data.stages)
   const topDropOffs = buildDropOffPoints(enrichedStages).slice(0, 3)
 

@@ -3,6 +3,7 @@ import KPICard from '@/components/cards/KPICard'
 import LineChart, { type LineChartDataPoint } from '@/components/charts/LineChart'
 import { formatNumber, formatPercent } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
+import { getDateWindow } from '@/lib/utils/date-range'
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -60,11 +61,6 @@ const MOCK_OVERVIEW: OverviewKPIs = {
   ],
 }
 
-/** YYYY-MM-DD (UTC), matching Postgres `date` columns. */
-function toDateString(d: Date): string {
-  return d.toISOString().slice(0, 10)
-}
-
 /** Percent change of `current` vs `previous`, guarding divide-by-zero. */
 function pctChange(current: number, previous: number): number {
   if (!previous) return current > 0 ? 100 : 0
@@ -111,13 +107,13 @@ async function fetchWindowedSum(
   }
 }
 
-async function getOverviewData(): Promise<OverviewKPIs> {
+async function getOverviewData(searchParams?: { range?: string }): Promise<OverviewKPIs> {
   try {
     const supabase = createServiceClient()
 
-    const now = new Date()
-    const since60d = toDateString(new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000))
-    const cutoff30d = toDateString(new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000))
+    const { startDate, prevStartDate } = getDateWindow(searchParams)
+    const since60d = prevStartDate
+    const cutoff30d = startDate
 
     const [
       usersWindow,
@@ -262,8 +258,12 @@ function getTrend(change: number): 'up' | 'down' | 'flat' {
   return 'flat'
 }
 
-export default async function OverviewPage() {
-  const data = await getOverviewData()
+export default async function OverviewPage({
+  searchParams,
+}: {
+  searchParams: { range?: string }
+}) {
+  const data = await getOverviewData(searchParams)
 
   return (
     <div>

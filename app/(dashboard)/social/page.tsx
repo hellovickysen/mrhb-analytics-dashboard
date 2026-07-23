@@ -6,6 +6,7 @@ import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
+import { getDateWindow } from '@/lib/utils/date-range'
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -196,21 +197,15 @@ const PLATFORM_STYLE_BY_REFERRER: Record<
   'www.youtube.com': { platform: 'YouTube', colorFrom: 'from-red-400', colorTo: 'to-red-600', textColor: 'text-red-600' },
 }
 
-function daysAgoISO(days: number): string {
-  const d = new Date()
-  d.setDate(d.getDate() - days)
-  return d.toISOString().slice(0, 10)
-}
-
 function formatTrendDate(dateStr: string): string {
   const d = new Date(dateStr)
   if (Number.isNaN(d.getTime())) return dateStr
   return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' })
 }
 
-async function getSocialData(): Promise<SocialData> {
+async function getSocialData(searchParams?: { range?: string }): Promise<SocialData> {
   const supabase = createServiceClient()
-  const since = daysAgoISO(30)
+  const { startDate: since } = getDateWindow(searchParams)
 
   const clicksRes = await supabase
     .from('shortio_clicks')
@@ -356,8 +351,12 @@ const topLinkColumns: DataTableColumn[] = [
   { key: 'topReferrer', label: 'Top Referrer', sortable: true },
 ]
 
-export default async function SocialPage() {
-  const data = await getSocialData()
+export default async function SocialPage({
+  searchParams,
+}: {
+  searchParams: { range?: string }
+}) {
+  const data = await getSocialData(searchParams)
 
   const humanClickRate = (data.humanClicks / data.totalClicks) * 100
   const topPlatform = [...data.platforms].sort((a, b) => b.humanClicks - a.humanClicks)[0]

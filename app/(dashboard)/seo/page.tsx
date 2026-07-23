@@ -6,6 +6,7 @@ import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
+import { getDateWindow } from '@/lib/utils/date-range'
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -134,11 +135,6 @@ const MOCK_SEO: SeoData = {
   ],
 }
 
-/** YYYY-MM-DD (UTC), matching Postgres `date` columns. */
-function toDateString(d: Date): string {
-  return d.toISOString().slice(0, 10)
-}
-
 /** Percent change of `current` vs `previous`, guarding divide-by-zero. */
 function pctChange(current: number, previous: number): number {
   if (!previous) return current > 0 ? 100 : 0
@@ -171,13 +167,13 @@ interface GscPageWindowRow {
   position: number
 }
 
-async function getSeoData(): Promise<SeoData> {
+async function getSeoData(searchParams?: { range?: string }): Promise<SeoData> {
   try {
     const supabase = createServiceClient()
 
-    const now = new Date()
-    const since60d = toDateString(new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000))
-    const cutoff30d = toDateString(new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000))
+    const { startDate, prevStartDate } = getDateWindow(searchParams)
+    const since60d = prevStartDate
+    const cutoff30d = startDate
 
     const [queriesResult, pagesResult] = await Promise.all([
       supabase
@@ -377,8 +373,12 @@ const pageColumns: DataTableColumn[] = [
   { key: 'position', label: 'Avg Position', sortable: true, align: 'right' },
 ]
 
-export default async function SeoPage() {
-  const data = await getSeoData()
+export default async function SeoPage({
+  searchParams,
+}: {
+  searchParams: { range?: string }
+}) {
+  const data = await getSeoData(searchParams)
 
   const queryRows = data.topQueries.map((row) => ({
     query: row.query,
