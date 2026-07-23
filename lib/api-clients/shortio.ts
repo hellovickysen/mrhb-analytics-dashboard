@@ -108,7 +108,7 @@ export async function fetchShortIOLinks(): Promise<Omit<ShortIOLink, 'id'>[]> {
     if (!domainId) return []
 
     const data = await shortioFetch(
-      `${API_BASE}/links?domain_id=${domainId}&limit=150`,
+      `${API_BASE}/api/links?domain_id=${domainId}&limit=150`,
       apiKey
     )
 
