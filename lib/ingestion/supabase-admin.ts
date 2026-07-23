@@ -78,7 +78,7 @@ export interface UpsertResult {
  */
 export async function upsertRows(
   tableName: string,
-  rows: Record<string, unknown>[],
+  rows: Record<string, any>[],
   conflictColumns: string[]
 ): Promise<UpsertResult> {
   // Nothing to do — avoid a pointless round-trip and log noise when a

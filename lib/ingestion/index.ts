@@ -76,7 +76,7 @@ export interface IngestionSummary {
 interface FetchTask {
   table: string
   conflictColumns: string[]
-  fetch: () => Promise<Record<string, unknown>[]>
+  fetch: () => Promise<Record<string, any>[]>
 }
 
 /* ------------------------------------------------------------------------ */
