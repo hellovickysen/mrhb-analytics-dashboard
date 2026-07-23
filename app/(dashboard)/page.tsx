@@ -1,12 +1,3 @@
-import {
-  Users,
-  Smartphone,
-  MousePointerClick,
-  Share2,
-  ScrollText,
-  DollarSign,
-  Globe,
-} from 'lucide-react'
 import Header from '@/components/layout/Header'
 import KPICard from '@/components/cards/KPICard'
 import LineChart, { type LineChartDataPoint } from '@/components/charts/LineChart'
@@ -81,6 +72,12 @@ async function getOverviewData(): Promise<OverviewKPIs> {
   }
 }
 
+function getTrend(change: number): 'up' | 'down' | 'flat' {
+  if (change > 0) return 'up'
+  if (change < 0) return 'down'
+  return 'flat'
+}
+
 export default async function OverviewPage() {
   const data = await getOverviewData()
 
@@ -88,61 +85,49 @@ export default async function OverviewPage() {
     <div>
       <Header title="Overview" />
 
-      {/* KPI cards row */}
+      {/* KPI cards row — pass iconName strings, not components */}
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <KPICard
           title="Total Users"
           value={formatNumber(data.totalUsers.value)}
           change={data.totalUsers.change}
-          trend={data.totalUsers.change > 0 ? 'up' : data.totalUsers.change < 0 ? 'down' : 'flat'}
-          icon={Users}
+          trend={getTrend(data.totalUsers.change)}
+          iconName="users"
         />
         <KPICard
           title="App Installs"
           value={formatNumber(data.appInstalls.value)}
           change={data.appInstalls.change}
-          trend={data.appInstalls.change > 0 ? 'up' : data.appInstalls.change < 0 ? 'down' : 'flat'}
-          icon={Smartphone}
+          trend={getTrend(data.appInstalls.change)}
+          iconName="smartphone"
         />
         <KPICard
           title="Organic Clicks"
           value={formatNumber(data.organicClicks.value)}
           change={data.organicClicks.change}
-          trend={data.organicClicks.change > 0 ? 'up' : data.organicClicks.change < 0 ? 'down' : 'flat'}
-          icon={MousePointerClick}
+          trend={getTrend(data.organicClicks.change)}
+          iconName="mouse-pointer-click"
         />
         <KPICard
           title="Social Clicks (Human)"
           value={formatNumber(data.socialClicksHuman.value)}
           change={data.socialClicksHuman.change}
-          trend={
-            data.socialClicksHuman.change > 0
-              ? 'up'
-              : data.socialClicksHuman.change < 0
-                ? 'down'
-                : 'flat'
-          }
-          icon={Share2}
+          trend={getTrend(data.socialClicksHuman.change)}
+          iconName="share2"
         />
         <KPICard
           title="Avg Scroll Depth"
           value={formatPercent(data.avgScrollDepth.value)}
           change={data.avgScrollDepth.change}
-          trend={
-            data.avgScrollDepth.change > 0
-              ? 'up'
-              : data.avgScrollDepth.change < 0
-                ? 'down'
-                : 'flat'
-          }
-          icon={ScrollText}
+          trend={getTrend(data.avgScrollDepth.change)}
+          iconName="scroll-text"
         />
         <KPICard
           title="Revenue"
           value={`$${formatNumber(data.revenue.value)}`}
           change={data.revenue.change}
-          trend={data.revenue.change > 0 ? 'up' : data.revenue.change < 0 ? 'down' : 'flat'}
-          icon={DollarSign}
+          trend={getTrend(data.revenue.change)}
+          iconName="dollar-sign"
         />
       </div>
 
@@ -186,7 +171,7 @@ export default async function OverviewPage() {
         {/* Top countries */}
         <div className="rounded-xl bg-mrhb-white p-5 shadow-sm">
           <div className="mb-4 flex items-center gap-2">
-            <Globe size={18} className="text-mrhb-blue" />
+            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-mrhb-blue-light text-sm">🌍</span>
             <h3 className="text-base font-semibold text-mrhb-dark">Top Countries</h3>
           </div>
           <ul className="space-y-3">

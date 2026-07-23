@@ -1,15 +1,49 @@
 'use client'
 
-import { ArrowUp, ArrowDown, Minus, type LucideIcon } from 'lucide-react'
+import {
+  ArrowUp,
+  ArrowDown,
+  Minus,
+  Users,
+  Smartphone,
+  MousePointerClick,
+  Share2,
+  ScrollText,
+  DollarSign,
+  TrendingUp,
+  Search,
+  FileText,
+  Filter,
+  Settings,
+  Globe,
+  type LucideIcon,
+} from 'lucide-react'
 
 export type Trend = 'up' | 'down' | 'flat'
+
+// Icon lookup map — KPICard resolves icons by name so Server Components can
+// reference them without passing a function across the RSC boundary.
+const ICON_MAP: Record<string, LucideIcon> = {
+  users: Users,
+  smartphone: Smartphone,
+  'mouse-pointer-click': MousePointerClick,
+  share2: Share2,
+  'scroll-text': ScrollText,
+  'dollar-sign': DollarSign,
+  'trending-up': TrendingUp,
+  search: Search,
+  'file-text': FileText,
+  filter: Filter,
+  settings: Settings,
+  globe: Globe,
+}
 
 interface KPICardProps {
   title: string
   value: string | number
   change?: number
   trend?: Trend
-  icon: LucideIcon
+  iconName: string
 }
 
 const TREND_STYLES: Record<
@@ -26,9 +60,10 @@ export default function KPICard({
   value,
   change,
   trend = 'flat',
-  icon: Icon,
+  iconName,
 }: KPICardProps) {
   const { textClass, Icon: TrendIcon } = TREND_STYLES[trend]
+  const Icon = ICON_MAP[iconName] ?? Users
 
   return (
     <div className="group rounded-xl bg-mrhb-white p-5 shadow-sm transition-shadow duration-200 hover:shadow-lg">
