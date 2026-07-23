@@ -1,5 +1,6 @@
 'use client'
 
+import { useState } from 'react'
 import {
   ArrowUp,
   ArrowDown,
@@ -52,6 +53,7 @@ interface KPICardProps {
   change?: number
   trend?: Trend
   iconName: string
+  tooltip?: string
 }
 
 const TREND_STYLES: Record<
@@ -69,12 +71,14 @@ export default function KPICard({
   change,
   trend = 'flat',
   iconName,
+  tooltip,
 }: KPICardProps) {
   const { textClass, Icon: TrendIcon } = TREND_STYLES[trend]
   const Icon = ICON_MAP[iconName] ?? Users
+  const [showTooltip, setShowTooltip] = useState(false)
 
   return (
-    <div className="group rounded-xl bg-mrhb-white p-5 shadow-sm transition-shadow duration-200 hover:shadow-lg">
+    <div className="group relative rounded-xl bg-mrhb-white p-5 shadow-sm transition-shadow duration-200 hover:shadow-lg">
       <div className="flex items-center justify-between">
         <div className="flex h-10 w-10 items-center justify-center rounded-full bg-mrhb-blue-light">
           <Icon size={20} className="text-mrhb-blue" />
@@ -88,7 +92,28 @@ export default function KPICard({
         )}
       </div>
 
-      <p className="mt-4 text-sm font-medium text-mrhb-dark/60">{title}</p>
+      <div className="mt-4 flex items-center gap-1.5">
+        <p className="text-sm font-medium text-mrhb-dark/60">{title}</p>
+        {tooltip && (
+          <div className="relative">
+            <button
+              type="button"
+              onMouseEnter={() => setShowTooltip(true)}
+              onMouseLeave={() => setShowTooltip(false)}
+              onClick={() => setShowTooltip(!showTooltip)}
+              className="flex h-4 w-4 items-center justify-center rounded-full bg-mrhb-dark/10 text-[10px] font-bold text-mrhb-dark/40 hover:bg-mrhb-blue/20 hover:text-mrhb-blue"
+            >
+              ?
+            </button>
+            {showTooltip && (
+              <div className="absolute bottom-full left-1/2 z-50 mb-2 w-52 -translate-x-1/2 rounded-lg bg-mrhb-dark px-3 py-2 text-xs leading-relaxed text-white shadow-lg">
+                {tooltip}
+                <div className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-mrhb-dark" />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
       <p className="mt-1 text-2xl font-semibold text-mrhb-dark">{value}</p>
     </div>
   )

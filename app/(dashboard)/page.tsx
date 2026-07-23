@@ -277,6 +277,7 @@ export default async function OverviewPage({
           change={data.totalUsers.change}
           trend={getTrend(data.totalUsers.change)}
           iconName="users"
+          tooltip="Total number of people who visited your website in this period"
         />
         <KPICard
           title="App Installs"
@@ -284,6 +285,7 @@ export default async function OverviewPage({
           change={data.appInstalls.change}
           trend={getTrend(data.appInstalls.change)}
           iconName="smartphone"
+          tooltip="Number of times Sahal Wallet was installed from the Play Store"
         />
         <KPICard
           title="Organic Clicks"
@@ -291,6 +293,7 @@ export default async function OverviewPage({
           change={data.organicClicks.change}
           trend={getTrend(data.organicClicks.change)}
           iconName="mouse-pointer-click"
+          tooltip="Clicks from Google search results to your website"
         />
         <KPICard
           title="Social Clicks (Human)"
@@ -298,6 +301,7 @@ export default async function OverviewPage({
           change={data.socialClicksHuman.change}
           trend={getTrend(data.socialClicksHuman.change)}
           iconName="share2"
+          tooltip="Real people (not bots) who clicked your Short.io social media links"
         />
         <KPICard
           title="Avg Scroll Depth"
@@ -305,6 +309,7 @@ export default async function OverviewPage({
           change={data.avgScrollDepth.change}
           trend={getTrend(data.avgScrollDepth.change)}
           iconName="scroll-text"
+          tooltip="How far down the page visitors scroll on average (100% = reached the bottom)"
         />
         <KPICard
           title="Revenue"
@@ -312,6 +317,7 @@ export default async function OverviewPage({
           change={data.revenue.change}
           trend={getTrend(data.revenue.change)}
           iconName="dollar-sign"
+          tooltip="Total revenue generated from in-app transactions"
         />
       </div>
 

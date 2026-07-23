@@ -357,6 +357,7 @@ export default async function RevenuePage({
           change={data.totalRevenue.change}
           trend={getTrend(data.totalRevenue.change)}
           iconName="dollar-sign"
+          tooltip="Total money earned from all in-app transactions"
         />
         <KPICard
           title="Transaction Count"
@@ -364,6 +365,7 @@ export default async function RevenuePage({
           change={data.transactionCount.change}
           trend={getTrend(data.transactionCount.change)}
           iconName="filter"
+          tooltip="Number of individual transactions completed"
         />
         <KPICard
           title="Avg Transaction Value"
@@ -371,6 +373,7 @@ export default async function RevenuePage({
           change={data.avgTransactionValue.change}
           trend={getTrend(data.avgTransactionValue.change)}
           iconName="trending-up"
+          tooltip="Average amount of money per transaction"
         />
         <KPICard
           title="Revenue Growth"
@@ -378,6 +381,7 @@ export default async function RevenuePage({
           change={data.revenueGrowth.change}
           trend={getTrend(data.revenueGrowth.change)}
           iconName="scroll-text"
+          tooltip="How much revenue changed compared to the previous period"
         />
       </div>
 

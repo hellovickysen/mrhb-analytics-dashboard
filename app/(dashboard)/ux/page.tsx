@@ -316,6 +316,7 @@ export default async function UXPage({
           change={data.scrollDepth.change}
           trend={getTrend(data.scrollDepth.change)}
           iconName="scroll-text"
+          tooltip="How far down visitors scroll on your pages on average"
         />
         <KPICard
           title="Active Time"
@@ -323,6 +324,7 @@ export default async function UXPage({
           change={data.activeTime.change}
           trend={getTrend(data.activeTime.change)}
           iconName="clock"
+          tooltip="Time visitors actively spend interacting with your site (not idle)"
         />
         <KPICard
           title="Pages / Session"
@@ -330,6 +332,7 @@ export default async function UXPage({
           change={data.pagesPerSession.change}
           trend={getTrend(data.pagesPerSession.change)}
           iconName="file-text"
+          tooltip="Average number of pages a visitor views in one session. Higher means more engagement"
         />
         <KPICard
           title="Dead Click Rate"
@@ -337,6 +340,7 @@ export default async function UXPage({
           change={data.deadClickRate.change}
           trend={getTrend(-data.deadClickRate.change)}
           iconName="mouse-pointer-click"
+          tooltip="Percentage of sessions where users clicked on non-clickable elements. Indicates confusing UI"
         />
       </div>
 

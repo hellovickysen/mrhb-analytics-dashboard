@@ -408,6 +408,7 @@ export default async function SeoPage({
           change={data.totalImpressions.change}
           trend={getTrend(data.totalImpressions.change)}
           iconName="search"
+          tooltip="How many times your pages appeared in Google search results"
         />
         <KPICard
           title="Total Clicks"
@@ -415,6 +416,7 @@ export default async function SeoPage({
           change={data.totalClicks.change}
           trend={getTrend(data.totalClicks.change)}
           iconName="mouse-pointer-click"
+          tooltip="How many times people clicked through from Google search to your site"
         />
         <KPICard
           title="Avg CTR"
@@ -422,6 +424,7 @@ export default async function SeoPage({
           change={data.avgCtr.change}
           trend={getTrend(data.avgCtr.change)}
           iconName="trending-up"
+          tooltip="Click-through rate: percentage of impressions that resulted in a click. Higher is better"
         />
         <KPICard
           title="Avg Position"
@@ -429,6 +432,7 @@ export default async function SeoPage({
           change={data.avgPosition.change}
           trend={getTrend(-data.avgPosition.change)}
           iconName="globe"
+          tooltip="Average ranking position in Google search results. Lower is better (1 = top result)"
         />
       </div>
 

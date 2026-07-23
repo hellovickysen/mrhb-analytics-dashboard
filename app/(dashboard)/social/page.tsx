@@ -386,21 +386,25 @@ export default async function SocialPage({
           title="Total Clicks"
           value={formatNumber(data.totalClicks)}
           iconName="mouse-pointer-click"
+          tooltip="All clicks on your Short.io social media links (includes bot traffic)"
         />
         <KPICard
           title="Human Clicks"
           value={formatNumber(data.humanClicks)}
           iconName="users"
+          tooltip="Clicks from real people only, excluding automated bots"
         />
         <KPICard
           title="Human Click Rate"
           value={formatPercent(humanClickRate)}
           iconName="filter"
+          tooltip="Percentage of total clicks that came from real people. Shows how much is genuine traffic"
         />
         <KPICard
           title="Top Platform"
           value={topPlatform.platform}
           iconName="trophy"
+          tooltip="The social media platform driving the most clicks to your links"
         />
       </div>
 

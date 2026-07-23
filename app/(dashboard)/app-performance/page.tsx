@@ -393,6 +393,7 @@ export default async function AppPerformancePage({
           change={data.totalInstalls.change}
           trend={getTrend(data.totalInstalls.change)}
           iconName="smartphone"
+          tooltip="Number of times your app was installed from the Play Store"
         />
         <KPICard
           title="Active Devices"
@@ -400,6 +401,7 @@ export default async function AppPerformancePage({
           change={data.activeDevices.change}
           trend={getTrend(data.activeDevices.change)}
           iconName="users"
+          tooltip="Devices that currently have your app installed and active"
         />
         <KPICard
           title="Avg Rating"
@@ -407,6 +409,7 @@ export default async function AppPerformancePage({
           change={data.avgRating.change}
           trend={getTrend(data.avgRating.change)}
           iconName="trending-up"
+          tooltip="Your app's average star rating on the Play Store (out of 5)"
         />
         <KPICard
           title="Uninstall Rate"
@@ -414,6 +417,7 @@ export default async function AppPerformancePage({
           change={data.uninstallRate.change}
           trend={getInverseTrend(data.uninstallRate.change)}
           iconName="filter"
+          tooltip="Percentage of users who uninstalled your app. Lower is better"
         />
         <KPICard
           title="Crash Rate"
@@ -421,6 +425,7 @@ export default async function AppPerformancePage({
           change={data.crashRate.change}
           trend={getInverseTrend(data.crashRate.change)}
           iconName="settings"
+          tooltip="Percentage of app sessions that ended in a crash. Lower is better"
         />
       </div>
 

@@ -467,6 +467,7 @@ export default async function BlogPage({
           change={data.totalBlogViews.change}
           trend={getTrend(data.totalBlogViews.change)}
           iconName="file-text"
+          tooltip="Total page views across all blog articles"
         />
         <KPICard
           title="Avg Read Time"
@@ -474,6 +475,7 @@ export default async function BlogPage({
           change={data.avgReadTime.change}
           trend={getTrend(data.avgReadTime.change)}
           iconName="scroll-text"
+          tooltip="Average time readers spend on a blog article"
         />
         <KPICard
           title="Top Post Views"
@@ -481,6 +483,7 @@ export default async function BlogPage({
           change={data.topPostViews.change}
           trend={getTrend(data.topPostViews.change)}
           iconName="trending-up"
+          tooltip="Page views of your most popular blog article"
         />
         <KPICard
           title="Search Impressions"
@@ -488,6 +491,7 @@ export default async function BlogPage({
           change={data.searchImpressions.change}
           trend={getTrend(data.searchImpressions.change)}
           iconName="search"
+          tooltip="How many times your blog articles appeared in Google search results"
         />
       </div>
 

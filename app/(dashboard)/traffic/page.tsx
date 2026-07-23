@@ -422,6 +422,7 @@ export default async function TrafficPage({
           change={data.sessions.change}
           trend={getTrend(data.sessions.change)}
           iconName="mouse-pointer-click"
+          tooltip="Total visits to your website. One person can have multiple sessions"
         />
         <KPICard
           title="Users"
@@ -429,6 +430,7 @@ export default async function TrafficPage({
           change={data.users.change}
           trend={getTrend(data.users.change)}
           iconName="users"
+          tooltip="Unique people who visited your website"
         />
         <KPICard
           title="New Users"
@@ -436,6 +438,7 @@ export default async function TrafficPage({
           change={data.newUsers.change}
           trend={getTrend(data.newUsers.change)}
           iconName="trending-up"
+          tooltip="First-time visitors who never visited your site before"
         />
         <KPICard
           title="Bounce Rate"
@@ -443,6 +446,7 @@ export default async function TrafficPage({
           change={data.bounceRate.change}
           trend={getTrend(-data.bounceRate.change)}
           iconName="filter"
+          tooltip="Percentage of visitors who left after viewing only one page. Lower is better"
         />
         <KPICard
           title="Avg Session Duration"
@@ -450,6 +454,7 @@ export default async function TrafficPage({
           change={data.avgSessionDuration.change}
           trend={getTrend(data.avgSessionDuration.change)}
           iconName="globe"
+          tooltip="Average time a visitor spends on your website per visit"
         />
       </div>
 
