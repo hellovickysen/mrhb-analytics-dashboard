@@ -109,11 +109,21 @@ function getAnalyticsDataClient(): analyticsdata_v1beta.Analyticsdata | null {
   return google.analyticsdata({ version: 'v1beta', auth })
 }
 
-/** Resolves the configured GA4 property resource name, e.g. `properties/123456789`. */
-function getGA4PropertyResource(): string | null {
-  const propertyId = process.env.GA4_PROPERTY_ID
+/** Resolves a GA4 property resource name, e.g. `properties/123456789`. */
+function getGA4PropertyResource(overrideId?: string): string | null {
+  const propertyId = overrideId || process.env.GA4_PROPERTY_ID
   if (!propertyId) {
     console.warn('[google-analytics] Missing GA4_PROPERTY_ID env var — GA4 fetch skipped.')
+    return null
+  }
+  return `properties/${propertyId}`
+}
+
+/** Resolves the Sahal Wallet app GA4 property (Firebase-linked). */
+function getGA4AppPropertyResource(): string | null {
+  const propertyId = process.env.GA4_APP_PROPERTY_ID
+  if (!propertyId) {
+    console.warn('[google-analytics] Missing GA4_APP_PROPERTY_ID env var — app events fetch skipped.')
     return null
   }
   return `properties/${propertyId}`
@@ -370,6 +380,96 @@ export async function fetchGA4Geo(
     }))
   } catch (error) {
     console.error('[google-analytics] fetchGA4Geo failed:', error)
+    return []
+  }
+}
+
+/* ------------------------------------------------------------------------ */
+/*  fetchGA4AppEvents -> ga_events (from Sahal Wallet Firebase GA4)          */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Fetches in-app events from the Sahal Wallet Firebase-linked GA4 property
+ * (GA4_APP_PROPERTY_ID). This captures events like wallet_created, token_swap,
+ * first_transaction, staking_initiated, etc. that Firebase sends to GA4.
+ *
+ * Results are merged into the same ga_events table alongside website events.
+ */
+export async function fetchGA4AppEvents(
+  startDate: string,
+  endDate: string
+): Promise<GA4EventRow[]> {
+  try {
+    const client = getAnalyticsDataClient()
+    const property = getGA4AppPropertyResource()
+    if (!client || !property) return []
+
+    const rows = await runPaginatedReport(client, property, {
+      dateRanges: [{ startDate, endDate }],
+      dimensions: [{ name: 'date' }, { name: 'eventName' }],
+      metrics: [{ name: 'eventCount' }, { name: 'totalUsers' }, { name: 'eventValue' }],
+    })
+
+    return rows.map((row): GA4EventRow => ({
+      date: formatGA4Date(dim(row, 0)),
+      event_name: dim(row, 1) || '(not set)',
+      event_count: toNumber(metric(row, 0)),
+      users: toNumber(metric(row, 1)),
+      event_value: toNumber(metric(row, 2)) || null,
+      is_conversion: false,
+    }))
+  } catch (error) {
+    console.error('[google-analytics] fetchGA4AppEvents failed:', error)
+    return []
+  }
+}
+
+/**
+ * Fetches traffic data from the Sahal Wallet Firebase GA4 property.
+ * Captures app sessions, user counts, and acquisition channels.
+ */
+export async function fetchGA4AppTraffic(
+  startDate: string,
+  endDate: string
+): Promise<GA4TrafficRow[]> {
+  try {
+    const client = getAnalyticsDataClient()
+    const property = getGA4AppPropertyResource()
+    if (!client || !property) return []
+
+    const rows = await runPaginatedReport(client, property, {
+      dateRanges: [{ startDate, endDate }],
+      dimensions: [
+        { name: 'date' },
+        { name: 'sessionDefaultChannelGroup' },
+        { name: 'sessionSource' },
+        { name: 'sessionMedium' },
+      ],
+      metrics: [
+        { name: 'sessions' },
+        { name: 'totalUsers' },
+        { name: 'newUsers' },
+        { name: 'screenPageViews' },
+        { name: 'bounceRate' },
+        { name: 'averageSessionDuration' },
+      ],
+    })
+
+    return rows.map((row): GA4TrafficRow => ({
+      date: formatGA4Date(dim(row, 0)),
+      channel: dim(row, 1) || '(not set)',
+      source: dim(row, 2) || '(not set)',
+      medium: dim(row, 3) || '(not set)',
+      campaign: '(not set)',
+      sessions: toNumber(metric(row, 0)),
+      users: toNumber(metric(row, 1)),
+      new_users: toNumber(metric(row, 2)),
+      pageviews: toNumber(metric(row, 3)),
+      bounce_rate: toNumber(metric(row, 4)) * 100,
+      avg_session_duration: toNumber(metric(row, 5)),
+    }))
+  } catch (error) {
+    console.error('[google-analytics] fetchGA4AppTraffic failed:', error)
     return []
   }
 }

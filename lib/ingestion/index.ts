@@ -30,6 +30,8 @@ import {
   fetchGA4Pages,
   fetchGA4Events,
   fetchGA4Geo,
+  fetchGA4AppEvents,
+  fetchGA4AppTraffic,
 } from '@/lib/api-clients/google-analytics'
 import { fetchGSCQueries, fetchGSCPages } from '@/lib/api-clients/search-console'
 import {
@@ -181,6 +183,17 @@ function buildTasksForSource(
           table: 'ga_geo',
           conflictColumns: CONFLICT_COLUMNS.ga_geo,
           fetch: () => fetchGA4Geo(startDate, endDate),
+        },
+        // Sahal Wallet Firebase GA4 (app events + app traffic)
+        {
+          table: 'ga_events',
+          conflictColumns: CONFLICT_COLUMNS.ga_events,
+          fetch: () => fetchGA4AppEvents(startDate, endDate),
+        },
+        {
+          table: 'ga_traffic',
+          conflictColumns: CONFLICT_COLUMNS.ga_traffic,
+          fetch: () => fetchGA4AppTraffic(startDate, endDate),
         },
       ]
 
