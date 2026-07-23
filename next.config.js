@@ -5,6 +5,9 @@ const nextConfig = {
       { protocol: 'https', hostname: 'mrhb.network' },
     ],
   },
+  experimental: {
+    missingSuspenseWithCSRBailout: false,
+  },
 }
 
 module.exports = nextConfig
