@@ -5,7 +5,7 @@ import { ArrowUp, ArrowDown, ChevronsUpDown } from 'lucide-react'
 
 export type DataTableAlign = 'left' | 'right' | 'center'
 
-export interface DataTableColumn<T> {
+export interface DataTableColumn<T = Record<string, unknown>> {
   /** Key into each row object this column renders. */
   key: keyof T & string
   label: string
@@ -13,7 +13,7 @@ export interface DataTableColumn<T> {
   align?: DataTableAlign
 }
 
-export interface DataTableProps<T extends Record<string, unknown>> {
+export interface DataTableProps<T extends Record<string, unknown> = Record<string, unknown>> {
   columns: DataTableColumn<T>[]
   data: T[]
   title?: string
@@ -28,7 +28,7 @@ const ALIGN_CLASS: Record<DataTableAlign, string> = {
   center: 'text-center',
 }
 
-export default function DataTable<T extends Record<string, unknown>>({
+export default function DataTable<T extends Record<string, unknown> = Record<string, unknown>>({
   columns,
   data,
   title,
