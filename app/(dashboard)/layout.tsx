@@ -41,6 +41,7 @@ export default function DashboardLayout({
           >
             <Menu size={20} />
           </button>
+          <img src="/logo.png" alt="MRHB" className="h-9 w-9 rounded-lg" />
           <div>
             <h1 className="font-syne text-lg font-bold text-mrhb-dark">MRHB</h1>
             <p className="font-syne text-[10px] tracking-widest text-mrhb-blue">ANALYTICS</p>

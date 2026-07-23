@@ -60,12 +60,8 @@ export default function LoginPage() {
       <div className="relative z-10 w-full max-w-md px-6">
         {/* Logo & branding */}
         <div className="mb-10 text-center">
-          <div className="mb-6 inline-flex items-center gap-3">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-[#01A6FA] to-[#0180c0] shadow-lg shadow-[#01A6FA]/20">
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
-                <path d="M3 3h7v7H3V3zm11 0h7v7h-7V3zM3 14h7v7H3v-7zm14 3.5a3.5 3.5 0 11-7 0 3.5 3.5 0 017 0z" fill="white" fillOpacity="0.9"/>
-              </svg>
-            </div>
+          <div className="mb-6 inline-flex items-center gap-4">
+            <img src="/logo.png" alt="MRHB" className="h-16 w-16 rounded-2xl shadow-lg shadow-[#E5B897]/20" />
             <div className="text-left">
               <h1 className="font-syne text-2xl font-bold tracking-tight text-white">
                 MRHB

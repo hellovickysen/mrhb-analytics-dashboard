@@ -99,11 +99,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
       {/* Logo area */}
       <div className="flex items-center justify-between border-b border-white/10 px-5 py-5">
         <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-[#01A6FA] to-[#0180c0]">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-              <path d="M3 3h7v7H3V3zm11 0h7v7h-7V3zM3 14h7v7H3v-7zm14 3.5a3.5 3.5 0 11-7 0 3.5 3.5 0 017 0z" fill="white" fillOpacity="0.9"/>
-            </svg>
-          </div>
+          <img src="/logo.png" alt="MRHB" className="h-9 w-9 rounded-lg" />
           <div>
             <h1 className="font-syne text-lg font-bold tracking-tight text-white">MRHB</h1>
             <p className="font-syne text-[10px] font-medium tracking-widest text-[#01A6FA]">ANALYTICS</p>
