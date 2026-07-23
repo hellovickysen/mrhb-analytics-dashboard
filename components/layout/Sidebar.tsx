@@ -95,7 +95,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
   }
 
   return (
-    <aside className="flex h-screen w-[260px] flex-col bg-mrhb-dark">
+    <aside className="flex h-[100dvh] w-[260px] flex-col bg-mrhb-dark">
       {/* Logo area */}
       <div className="flex items-center justify-between border-b border-white/10 px-5 py-5">
         <div className="flex items-center gap-3">
@@ -155,28 +155,13 @@ export default function Sidebar({ onClose }: SidebarProps) {
         </ul>
       </nav>
 
-      {/* Sync section */}
-      <div className="border-t border-white/10 px-4 py-3">
-        <p className="mb-2 text-xs text-mrhb-warm-grey">
-          Last synced: <span className="text-white/80">{lastSynced}</span>
-        </p>
-        <button
-          type="button"
-          onClick={handleSync}
-          disabled={isSyncing}
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-mrhb-blue/10 px-3 py-2 text-sm font-medium text-mrhb-blue transition-colors hover:bg-mrhb-blue/20 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          <RefreshCw size={14} className={isSyncing ? 'animate-spin' : ''} />
-          {isSyncing ? 'Syncing...' : 'Sync now'}
-        </button>
-      </div>
-
-      {/* User section */}
-      {userName && (
-        <div className="border-t border-white/10 px-4 py-3">
-          <div className="flex items-center justify-between">
+      {/* Bottom section: user + sync combined for compact mobile fit */}
+      <div className="flex-shrink-0 border-t border-white/10">
+        {/* User + logout row */}
+        {userName && (
+          <div className="flex items-center justify-between px-4 py-2.5">
             <div className="flex items-center gap-2.5">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-[#01A6FA] to-[#0180c0] text-xs font-bold text-white">
+              <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#01A6FA] to-[#0180c0] text-xs font-bold text-white">
                 {userName.charAt(0).toUpperCase()}
               </div>
               <div>
@@ -193,8 +178,22 @@ export default function Sidebar({ onClose }: SidebarProps) {
               <LogOut size={14} />
             </button>
           </div>
+        )}
+
+        {/* Sync row */}
+        <div className="flex items-center gap-2 px-4 py-2.5">
+          <button
+            type="button"
+            onClick={handleSync}
+            disabled={isSyncing}
+            className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-mrhb-blue/10 px-3 py-2 text-sm font-medium text-mrhb-blue transition-colors hover:bg-mrhb-blue/20 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <RefreshCw size={14} className={isSyncing ? 'animate-spin' : ''} />
+            {isSyncing ? 'Syncing...' : 'Sync'}
+          </button>
+          <span className="text-[10px] text-mrhb-warm-grey">{lastSynced}</span>
         </div>
-      )}
+      </div>
     </aside>
   )
 }
