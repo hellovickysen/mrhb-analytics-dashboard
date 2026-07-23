@@ -1,0 +1,86 @@
+'use client'
+
+import { useState } from 'react'
+import { RefreshCw } from 'lucide-react'
+
+export type DateRange = '7d' | '30d' | '90d'
+
+interface HeaderProps {
+  title: string
+  onDateRangeChange?: (range: DateRange) => void
+  onRefresh?: () => void | Promise<void>
+  defaultRange?: DateRange
+}
+
+const RANGE_OPTIONS: { label: string; value: DateRange }[] = [
+  { label: '7d', value: '7d' },
+  { label: '30d', value: '30d' },
+  { label: '90d', value: '90d' },
+]
+
+export default function Header({
+  title,
+  onDateRangeChange,
+  onRefresh,
+  defaultRange = '30d',
+}: HeaderProps) {
+  const [activeRange, setActiveRange] = useState<DateRange>(defaultRange)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+
+  const handleRangeClick = (range: DateRange) => {
+    setActiveRange(range)
+    onDateRangeChange?.(range)
+  }
+
+  const handleRefresh = async () => {
+    if (isRefreshing) return
+    setIsRefreshing(true)
+    try {
+      await onRefresh?.()
+    } finally {
+      // Keep the spinner visible briefly even for instant refreshes,
+      // so the interaction always feels acknowledged.
+      setTimeout(() => setIsRefreshing(false), 600)
+    }
+  }
+
+  return (
+    <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <h1 className="text-2xl font-semibold text-mrhb-dark">{title}</h1>
+
+      <div className="flex items-center gap-3">
+        {/* Date range picker */}
+        <div className="flex items-center rounded-lg border border-mrhb-warm-grey/30 bg-mrhb-white p-1">
+          {RANGE_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => handleRangeClick(option.value)}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                activeRange === option.value
+                  ? 'bg-mrhb-blue text-mrhb-white'
+                  : 'text-mrhb-dark/70 hover:bg-mrhb-blue-light'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Refresh button */}
+        <button
+          type="button"
+          onClick={handleRefresh}
+          disabled={isRefreshing}
+          className="flex items-center gap-2 rounded-lg border border-mrhb-warm-grey/30 bg-mrhb-white px-3 py-2 text-sm font-medium text-mrhb-dark transition-colors hover:bg-mrhb-blue-light disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <RefreshCw
+            size={16}
+            className={isRefreshing ? 'animate-spin text-mrhb-blue' : ''}
+          />
+          {isRefreshing ? 'Refreshing…' : 'Refresh'}
+        </button>
+      </div>
+    </div>
+  )
+}
