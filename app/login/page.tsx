@@ -2,6 +2,7 @@
 
 import { useState, FormEvent } from 'react'
 import { useRouter } from 'next/navigation'
+import { MRHB_LOGO } from '@/lib/utils/logo'
 
 const ALLOWED_NAMES = ['varun']
 
@@ -61,7 +62,7 @@ export default function LoginPage() {
         {/* Logo & branding */}
         <div className="mb-10 text-center">
           <div className="mb-6 inline-flex items-center gap-4">
-            <img src="/logo.png" alt="MRHB" className="h-16 w-16 rounded-2xl shadow-lg shadow-[#E5B897]/20" />
+            <img src={MRHB_LOGO} alt="MRHB" className="h-16 w-16 rounded-2xl shadow-lg shadow-[#E5B897]/20" />
             <div className="text-left">
               <h1 className="font-syne text-2xl font-bold tracking-tight text-white">
                 MRHB

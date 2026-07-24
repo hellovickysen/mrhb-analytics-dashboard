@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useState, useEffect } from 'react'
+import { MRHB_LOGO } from '@/lib/utils/logo'
 import {
   LayoutDashboard,
   TrendingUp,
@@ -99,7 +100,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
       {/* Logo area */}
       <div className="flex items-center justify-between border-b border-white/10 px-5 py-5">
         <div className="flex items-center gap-3">
-          <img src="/logo.png" alt="MRHB" className="h-9 w-9 rounded-lg" />
+          <img src={MRHB_LOGO} alt="MRHB" className="h-9 w-9 rounded-lg" />
           <div>
             <h1 className="font-syne text-lg font-bold tracking-tight text-white">MRHB</h1>
             <p className="font-syne text-[10px] font-medium tracking-widest text-[#01A6FA]">ANALYTICS</p>
