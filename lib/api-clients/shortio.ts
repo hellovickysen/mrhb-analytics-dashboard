@@ -292,18 +292,34 @@ export async function fetchAllShortIOData(
     }
 
     // Daily time-series rows — PRIMARY data source for date-range queries.
-    // Human clicks estimated per day using the period-wide ratio since
-    // Short.io's API only returns human clicks as a period total.
+    // Distribute human clicks proportionally across days, ensuring the
+    // total sum equals the exact period total (no rounding loss).
     if (stats.clickStatistics?.datasets?.[0]?.data) {
-      for (const point of stats.clickStatistics.datasets[0].data) {
+      const dailyPoints = stats.clickStatistics.datasets[0].data
+        .filter((p: any) => p.x && typeof p.y === 'number')
+
+      // Proportional distribution with rounding correction
+      let humanRemaining = totalHuman
+      const dailyTotals = dailyPoints.map((p: any) => p.y || 0)
+      const clicksSum = dailyTotals.reduce((s: number, v: number) => s + v, 0) || 1
+
+      for (let i = 0; i < dailyPoints.length; i++) {
+        const point = dailyPoints[i]
         const dateStr = (point.x || '').slice(0, 10)
         const dailyTotal = point.y || 0
+
+        // Last day gets all remaining to guarantee exact total
+        const dailyHuman = i === dailyPoints.length - 1
+          ? humanRemaining
+          : Math.round((dailyTotal / clicksSum) * totalHuman)
+        humanRemaining -= dailyHuman
+
         if (dateStr) {
           clickRows.push({
             date: dateStr,
             link_id: 'domain_daily',
             total_clicks: dailyTotal,
-            human_clicks: Math.round(dailyTotal * humanRatio),
+            human_clicks: Math.max(0, dailyHuman),
             country: 'ALL',
             city: 'ALL',
             os: 'ALL',
