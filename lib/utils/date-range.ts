@@ -1,22 +1,16 @@
 /**
  * Shared date range utility for dashboard pages.
  *
- * Reads the `range` search param (7d | 30d | 90d) and returns
- * YYYY-MM-DD strings for Supabase queries.
+ * Reads the `range` search param (today | yesterday | 7d | 30d | 90d)
+ * and returns YYYY-MM-DD strings for Supabase queries.
  */
 
-export type DateRangeKey = '7d' | '30d' | '90d'
-
-const RANGE_DAYS: Record<DateRangeKey, number> = {
-  '7d': 7,
-  '30d': 30,
-  '90d': 90,
-}
+export type DateRangeKey = 'today' | 'yesterday' | '7d' | '30d' | '90d'
 
 export interface DateWindow {
   /** Start of the current period (YYYY-MM-DD) */
   startDate: string
-  /** End date — today (YYYY-MM-DD) */
+  /** End date (YYYY-MM-DD) */
   endDate: string
   /** Start of the previous comparison period (YYYY-MM-DD) */
   prevStartDate: string
@@ -24,7 +18,7 @@ export interface DateWindow {
   prevEndDate: string
   /** Number of days in the window */
   days: number
-  /** The range key (7d, 30d, 90d) */
+  /** The range key */
   range: DateRangeKey
 }
 
@@ -37,20 +31,50 @@ function toDateString(d: Date): string {
  * period boundaries. Pages pass `searchParams.range` and get back dates
  * ready for Supabase `.gte('date', startDate)` queries.
  *
- * The previous period is the same length, ending where the current period begins.
- * This enables period-over-period comparison for KPI change percentages.
+ * - today: current day, compared to yesterday
+ * - yesterday: previous day, compared to the day before
+ * - 7d/30d/90d: last N days, compared to the N days before that
  */
 export function getDateWindow(
   searchParams?: { range?: string }
 ): DateWindow {
   const rangeKey = (searchParams?.range as DateRangeKey) || '30d'
-  const days = RANGE_DAYS[rangeKey] || 30
-
   const now = new Date()
-  const endDate = toDateString(now)
-  const startDate = toDateString(new Date(now.getTime() - days * 24 * 60 * 60 * 1000))
-  const prevStartDate = toDateString(new Date(now.getTime() - 2 * days * 24 * 60 * 60 * 1000))
-  const prevEndDate = startDate
+  const DAY = 24 * 60 * 60 * 1000
+
+  let startDate: string
+  let endDate: string
+  let prevStartDate: string
+  let prevEndDate: string
+  let days: number
+
+  switch (rangeKey) {
+    case 'today':
+      days = 1
+      endDate = toDateString(now)
+      startDate = endDate // same day
+      prevEndDate = startDate
+      prevStartDate = toDateString(new Date(now.getTime() - DAY)) // yesterday
+      break
+
+    case 'yesterday':
+      days = 1
+      endDate = toDateString(new Date(now.getTime() - DAY))
+      startDate = endDate // same day
+      prevEndDate = startDate
+      prevStartDate = toDateString(new Date(now.getTime() - 2 * DAY)) // day before yesterday
+      break
+
+    default: {
+      const daysMap: Record<string, number> = { '7d': 7, '30d': 30, '90d': 90 }
+      days = daysMap[rangeKey] || 30
+      endDate = toDateString(now)
+      startDate = toDateString(new Date(now.getTime() - days * DAY))
+      prevStartDate = toDateString(new Date(now.getTime() - 2 * days * DAY))
+      prevEndDate = startDate
+      break
+    }
+  }
 
   return {
     startDate,

@@ -4,13 +4,15 @@ import { useState } from 'react'
 import { useRouter, useSearchParams, usePathname } from 'next/navigation'
 import { RefreshCw } from 'lucide-react'
 
-export type DateRange = '7d' | '30d' | '90d'
+export type DateRange = 'today' | 'yesterday' | '7d' | '30d' | '90d'
 
 interface HeaderProps {
   title: string
 }
 
 const RANGE_OPTIONS: { label: string; value: DateRange }[] = [
+  { label: 'Today', value: 'today' },
+  { label: 'Yesterday', value: 'yesterday' },
   { label: '7d', value: '7d' },
   { label: '30d', value: '30d' },
   { label: '90d', value: '90d' },
@@ -45,13 +47,13 @@ export default function Header({ title }: HeaderProps) {
 
       <div className="flex items-center gap-3">
         {/* Date range picker — updates URL search params */}
-        <div className="flex items-center rounded-lg border border-mrhb-warm-grey/30 bg-mrhb-white p-1">
+        <div className="flex flex-wrap items-center rounded-lg border border-mrhb-warm-grey/30 bg-mrhb-white p-1">
           {RANGE_OPTIONS.map((option) => (
             <button
               key={option.value}
               type="button"
               onClick={() => handleRangeClick(option.value)}
-              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+              className={`rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors ${
                 activeRange === option.value
                   ? 'bg-mrhb-blue text-mrhb-white'
                   : 'text-mrhb-dark/70 hover:bg-mrhb-blue-light'
