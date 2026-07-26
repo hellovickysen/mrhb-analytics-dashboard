@@ -138,13 +138,15 @@ async function getFunnelData(searchParams?: { range?: string }): Promise<FunnelD
     .eq('event_name', 'first_open')
     .gte('date', since)
 
-  // Stage 4: Onboarding Started — any of the onboarding-entry event families.
+  // Stage 4: Onboarding Started — new user first actions only (not screen views).
+  // Uses EW_ prefix events which are cross-platform action events, not SA_ screen views
+  // which fire for returning users too.
   const stage4 = await supabase
     .from('ga_events')
     .select('event_count')
     .gte('date', since)
     .or(
-      'event_name.like.SA_GET_STARTED%,event_name.like.EW_ONBOARDING_LETS_GO%,event_name.like.EW_ONBOARDING_SOCIAL_SIGNUP%,event_name.like.EW_ONBOARDING_IMPORT_WALLET%'
+      'event_name.like.EW_ONBOARDING_LETS_GO%,event_name.like.EW_ONBOARDING_SOCIAL_SIGNUP%,event_name.like.EW_ONBOARDING_IMPORT_WALLET%,event_name.like.EW_ONBOARDING_IMPORT_BACKUP%,event_name.like.EW_ONBOARDING_IMPORT_PRIVATE%,event_name.like.EW_ONBOARDING_GUIDE_SKIP%'
     )
 
   // Stage 5: Wallet Created — reaching the main app dashboard requires a
@@ -162,13 +164,17 @@ async function getFunnelData(searchParams?: { range?: string }): Promise<FunnelD
     .eq('event_name', 'EW_ONBOARDING_GUIDE_COMPLETE')
     .gte('date', since)
 
-  // Stage 7: First Transaction — all send/swap events
-  // (EA_SEND_type_protocol, EA_SEND_SWAP_protocol, etc.).
-  const stage7 = await supabase
-    .from('ga_events')
-    .select('event_count')
-    .gte('date', since)
-    .like('event_name', 'EA_SEND_%')
+  // Stage 7: Transactions — all send/swap/stake/store events across platforms.
+  // EA_SEND_* = Android, EI_SEND_* = iOS, EW_SEND_* = web/extension
+  // Dev team confirmed: SENTx, SWAPxLIFI, SAHAL_STAKEx, MRHB_STOREx, etc.
+  const [stage7a, stage7b, stage7c] = await Promise.all([
+    supabase.from('ga_events').select('event_count').gte('date', since).like('event_name', 'EA_SEND_%'),
+    supabase.from('ga_events').select('event_count').gte('date', since).like('event_name', 'EI_SEND_%'),
+    supabase.from('ga_events').select('event_count').gte('date', since).like('event_name', 'EW_SEND_%'),
+  ])
+  const stage7 = {
+    data: [...(stage7a.data ?? []), ...(stage7b.data ?? []), ...(stage7c.data ?? [])],
+  }
 
   // Stage 8: Retained (30-day) — a full "first SA_APP_DASHBOARD + 30 days
   // later" cohort query isn't expressible through supabase-js without a
