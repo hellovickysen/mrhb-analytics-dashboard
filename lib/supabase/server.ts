@@ -65,6 +65,11 @@ export function createServiceClient() {
     return createClient()
   }
 
-  _serviceClient = createSupabaseClient(url, key)
+  _serviceClient = createSupabaseClient(url, key, {
+    global: {
+      // Disable Next.js fetch caching so dashboard always shows fresh data
+      fetch: (input, init) => fetch(input, { ...init, cache: 'no-store' }),
+    },
+  })
   return _serviceClient
 }
