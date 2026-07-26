@@ -70,14 +70,16 @@ interface DataSourceCard {
   icon: LucideIcon
   lastSync: string
   records: number
+  connected: boolean
+  note?: string
 }
 
 const DATA_SOURCES: DataSourceCard[] = [
-  { id: 'ga4', name: 'Google Analytics', icon: BarChart3, lastSync: '2 hours ago', records: 48210 },
-  { id: 'gsc', name: 'Google Search Console', icon: Search, lastSync: '3 hours ago', records: 12340 },
-  { id: 'play', name: 'Google Play Console', icon: Smartphone, lastSync: '1 hour ago', records: 6320 },
-  { id: 'shortio', name: 'Short.io', icon: Link2, lastSync: '30 min ago', records: 1166 },
-  { id: 'clarity', name: 'Microsoft Clarity', icon: MousePointerClick, lastSync: '4 hours ago', records: 20 },
+  { id: 'ga4', name: 'Google Analytics', icon: BarChart3, lastSync: 'Auto (daily)', records: 24312, connected: true, note: 'Website + Sahal Wallet Firebase' },
+  { id: 'gsc', name: 'Google Search Console', icon: Search, lastSync: 'Auto (daily)', records: 4770, connected: true },
+  { id: 'play', name: 'Play Store + App Store', icon: Smartphone, lastSync: 'Auto (daily)', records: 2, connected: true, note: 'Scraped from public pages' },
+  { id: 'shortio', name: 'Short.io', icon: Link2, lastSync: 'Auto (daily)', records: 146, connected: true },
+  { id: 'clarity', name: 'Microsoft Clarity', icon: MousePointerClick, lastSync: 'Never', records: 0, connected: false, note: 'API limited — 0 data returned' },
 ]
 
 type SyncStatus = 'success' | 'error'
@@ -165,16 +167,23 @@ function DataSourceStatusCard({ source }: { source: DataSourceCard }) {
   return (
     <div className="rounded-xl bg-mrhb-white p-5 shadow-sm">
       <div className="flex items-center justify-between">
-        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-mrhb-blue-light">
-          <Icon size={20} className="text-mrhb-blue" />
+        <div className={`flex h-10 w-10 items-center justify-center rounded-full ${source.connected ? 'bg-mrhb-blue-light' : 'bg-red-50'}`}>
+          <Icon size={20} className={source.connected ? 'text-mrhb-blue' : 'text-red-400'} />
         </div>
-        <div className="flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-600">
+        <div className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
+          source.connected
+            ? 'bg-emerald-50 text-emerald-600'
+            : 'bg-red-50 text-red-500'
+        }`}>
           <CheckCircle2 size={13} />
-          Connected
+          {source.connected ? 'Connected' : 'Not Connected'}
         </div>
       </div>
 
       <p className="mt-4 text-sm font-semibold text-mrhb-dark">{source.name}</p>
+      {source.note && (
+        <p className="mt-0.5 text-[11px] text-mrhb-dark/40">{source.note}</p>
+      )}
 
       <dl className="mt-3 space-y-1.5 text-xs text-mrhb-dark/60">
         <div className="flex items-center justify-between">
