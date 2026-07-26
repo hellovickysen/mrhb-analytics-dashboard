@@ -127,8 +127,8 @@ async function getOverviewData(searchParams?: { range?: string }): Promise<Overv
       geoResult,
     ] = await Promise.all([
       fetchWindowedSum(supabase, 'ga_traffic', 'users', 'date', since60d, cutoff30d),
-      fetchWindowedSum(supabase, 'play_installs', 'installs', 'date', since60d, cutoff30d, (q) =>
-        q.eq('country', 'ALL')
+      fetchWindowedSum(supabase, 'ga_events', 'event_count', 'date', since60d, cutoff30d, (q) =>
+        q.eq('event_name', 'first_open')
       ),
       fetchWindowedSum(supabase, 'gsc_queries', 'clicks', 'date', since60d, cutoff30d),
       fetchWindowedSum(supabase, 'shortio_clicks', 'human_clicks', 'date', since60d, cutoff30d),
