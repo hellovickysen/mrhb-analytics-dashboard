@@ -41,6 +41,7 @@ import {
 } from '@/lib/api-clients/play-console'
 import { fetchAllShortIOData } from '@/lib/api-clients/shortio'
 import { fetchClaritySessions, fetchClarityFriction } from '@/lib/api-clients/clarity'
+import { fetchStoreDataForIngestion } from '@/lib/api-clients/store-scraper'
 
 /* ------------------------------------------------------------------------ */
 /*  Types                                                                   */
@@ -211,20 +212,31 @@ function buildTasksForSource(
         },
       ]
 
-    case 'play':
+    case 'play': {
+      // Primary source: scrape public Play Store + App Store pages (no API key needed).
+      // Falls back to Play Console API if available, but store scraping covers
+      // install counts and ratings without management security concerns.
+      const storeData = fetchStoreDataForIngestion()
+
       return [
         {
           table: 'play_installs',
           conflictColumns: CONFLICT_COLUMNS.play_installs,
-          fetch: () => fetchPlayInstalls(startDate, endDate),
+          fetch: async () => {
+            // Try store scraper first, fall back to Play Console API
+            const scraped = await storeData
+            if (scraped.installs.length > 0) return scraped.installs
+            return fetchPlayInstalls(startDate, endDate)
+          },
         },
         {
           table: 'play_ratings',
           conflictColumns: CONFLICT_COLUMNS.play_ratings,
-          // fetchPlayRatings() takes no date range (it's a current snapshot)
-          // and returns a single row rather than an array — normalize to
-          // Row[] so it fits the same upsert path as every other task.
-          fetch: async () => [await fetchPlayRatings()],
+          fetch: async () => {
+            const scraped = await storeData
+            if (scraped.ratings.length > 0) return scraped.ratings
+            return [await fetchPlayRatings()]
+          },
         },
         {
           table: 'play_store_listing',
@@ -232,6 +244,7 @@ function buildTasksForSource(
           fetch: () => fetchPlayStoreListing(startDate, endDate),
         },
       ]
+    }
 
     case 'shortio': {
       // fetchAllShortIOData returns both tables' rows in one call (Short.io's

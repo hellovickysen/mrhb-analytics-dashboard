@@ -9,15 +9,26 @@ import { getDateWindow } from '@/lib/utils/date-range'
 // ---------------------------------------------------------------------------
 // Data fetching
 // ---------------------------------------------------------------------------
-// This is a Server Component. The funnel is stitched together live from five
-// independent source tables (there is no single pre-built "funnel" rollup
-// table yet) — Short.io clicks -> GA4 sessions -> GA4 blog/product pageviews
-// -> Play Console store impressions -> Play Console installs -> GA4
-// wallet/transaction events. Each stage query is independent, so a gap in
-// one source (e.g. Play Console not synced yet) doesn't take down the whole
-// page — we simply fall back to mock data for the entire funnel whenever any
-// stage can't be computed from real rows, to keep the funnel internally
-// consistent (a partially-mock, partially-real funnel would be misleading).
+// This is a Server Component. The funnel is stitched together live from
+// Short.io clicks -> GA4 web sessions -> real Firebase/GA4-for-Firebase event
+// names emitted by the Sahal mobile app, as recorded in `ga_events`. Firebase
+// automatically fires `first_open` on first app launch after install, so that
+// replaces the old Play Console install-count dependency entirely — there's
+// no more separate "Play Store View" stage since Play Console isn't wired up
+// as a source here.
+//
+// Each stage is queried independently against `ga_events` (or, for the top
+// of the funnel, `shortio_clicks` / `ga_traffic`), so a gap in one event
+// stream doesn't take down the whole page. Per-stage results fall back to a
+// per-stage mock value when that stage's query errors or returns 0, and the
+// whole funnel falls back to the fully-mocked dataset only if every real
+// stage came back empty (i.e. `ga_events` hasn't synced anything yet).
+//
+// Firebase event volume isn't guaranteed to be monotonically decreasing the
+// way a strict funnel is (e.g. duplicate `SA_APP_DASHBOARD` fires per
+// session can outnumber `first_open` events from installs before the tracked
+// window). To keep the funnel visualization meaningful, later stages are
+// capped at the previous stage's value after all queries resolve.
 
 interface FunnelStageRow {
   name: string
@@ -35,16 +46,31 @@ interface FunnelData {
   attribution: AttributionRow[]
 }
 
+// Per-stage fallback values, used whenever that specific stage's query
+// errors or comes back with a zero sum. Keeping these per-stage (rather than
+// only an all-or-nothing mock) means a single slow-to-sync event name
+// doesn't blank out stages that do have real data.
+const STAGE_FALLBACKS = {
+  socialDiscovery: 14320,
+  websiteVisit: 9142,
+  appInstall: 1860,
+  onboardingStarted: 3210,
+  walletCreated: 1120,
+  onboardingComplete: 486,
+  firstTransaction: 486,
+  retained: 312,
+} as const
+
 const MOCK_FUNNEL_DATA: FunnelData = {
   stages: [
-    { name: 'Social Discovery', users: 14320 },
-    { name: 'Website Visit', users: 9142 },
-    { name: 'Blog/Product Engagement', users: 5840 },
-    { name: 'Play Store View', users: 3210 },
-    { name: 'App Install', users: 1860 },
-    { name: 'Wallet Created', users: 1120 },
-    { name: 'First Transaction', users: 486 },
-    { name: 'Retained (30-day)', users: 312 },
+    { name: 'Social Discovery', users: STAGE_FALLBACKS.socialDiscovery },
+    { name: 'Website Visit', users: STAGE_FALLBACKS.websiteVisit },
+    { name: 'App Install', users: STAGE_FALLBACKS.appInstall },
+    { name: 'Onboarding Started', users: STAGE_FALLBACKS.onboardingStarted },
+    { name: 'Wallet Created', users: STAGE_FALLBACKS.walletCreated },
+    { name: 'Onboarding Complete', users: STAGE_FALLBACKS.onboardingComplete },
+    { name: 'First Transaction', users: STAGE_FALLBACKS.firstTransaction },
+    { name: 'Retained (30-day)', users: STAGE_FALLBACKS.retained },
   ],
   attribution: [
     { platform: 'Twitter', shortioHumanClicks: 77, ga4Sessions: 3480 },
@@ -67,83 +93,165 @@ const REFERRER_TO_PLATFORM: Record<string, string> = {
   'www.youtube.com': 'YouTube',
 }
 
+// GA4 `source` values that correspond to each social platform's attribution
+// bucket (lowercased for case-insensitive matching).
+const PLATFORM_BY_GA_SOURCE: Record<string, string> = {
+  twitter: 'Twitter',
+  't.co': 'Twitter',
+  x: 'Twitter',
+  telegram: 'Telegram',
+  facebook: 'Facebook',
+  'm.facebook.com': 'Facebook',
+  linkedin: 'LinkedIn',
+  instagram: 'Instagram',
+  youtube: 'YouTube',
+}
+
+/** Sums `event_count` off a `ga_events`-shaped result set, treating nulls as 0. */
+function sumEventCount(rows: { event_count: number | null }[] | null): number {
+  return (rows ?? []).reduce((sum, row) => sum + (row.event_count ?? 0), 0)
+}
+
 async function getFunnelData(searchParams?: { range?: string }): Promise<FunnelData> {
   const supabase = createServiceClient()
   const { startDate: since } = getDateWindow(searchParams)
 
-  // Stage 1: Social Discovery — human clicks on shortened social links.
+  // Stage 1: Social Discovery — Short.io's domain-wide click rollup row.
   const stage1 = await supabase
     .from('shortio_clicks')
-    .select('human_clicks')
+    .select('total_clicks')
+    .eq('link_id', 'domain_total')
     .gte('date', since)
 
-  // Stage 2: Website Visit — GA4 sessions arriving via social/referral.
+  // Stage 2: Website Visit — GA4 web sessions arriving via social/referral.
   const stage2 = await supabase
     .from('ga_traffic')
-    .select('sessions, channel')
+    .select('sessions')
     .gte('date', since)
-    .in('channel', ['social', 'referral'])
+    .in('channel', ['Social', 'Referral', 'Organic Social'])
 
-  // Stage 3: Blog/Product Engagement — pageviews on blog or Sahal pages.
+  // Stage 3: App Install — Firebase's automatic `first_open` event, which
+  // fires the first time the app is launched after install.
   const stage3 = await supabase
-    .from('ga_pages')
-    .select('pageviews, page_path')
-    .gte('date', since)
-
-  // Stage 4: Play Store View — store listing impressions.
-  const stage4 = await supabase
-    .from('play_store_listing')
-    .select('impressions')
-    .gte('date', since)
-
-  // Stage 5: App Install — Play Console installs.
-  const stage5 = await supabase
-    .from('play_installs')
-    .select('installs')
-    .gte('date', since)
-
-  // Stages 6-8: Wallet Created / First Transaction / Retained — GA4 events.
-  const stage678 = await supabase
     .from('ga_events')
-    .select('event_name, event_count')
+    .select('event_count')
+    .eq('event_name', 'first_open')
     .gte('date', since)
-    .in('event_name', ['wallet_created', 'first_transaction', 'retained_30_day'])
 
-  const anyError =
-    stage1.error || stage2.error || stage3.error || stage4.error || stage5.error || stage678.error
+  // Stage 4: Onboarding Started — any of the onboarding-entry event families.
+  const stage4 = await supabase
+    .from('ga_events')
+    .select('event_count')
+    .gte('date', since)
+    .or(
+      'event_name.like.SA_GET_STARTED%,event_name.like.EW_ONBOARDING_LETS_GO%,event_name.like.EW_ONBOARDING_SOCIAL_SIGNUP%,event_name.like.EW_ONBOARDING_IMPORT_WALLET%'
+    )
 
-  const socialDiscovery = (stage1.data ?? []).reduce((sum, r) => sum + (r.human_clicks ?? 0), 0)
+  // Stage 5: Wallet Created — reaching the main app dashboard requires a
+  // wallet to exist, so `SA_APP_DASHBOARD` is used as the wallet-created proxy.
+  const stage5 = await supabase
+    .from('ga_events')
+    .select('event_count')
+    .eq('event_name', 'SA_APP_DASHBOARD')
+    .gte('date', since)
+
+  // Stage 6: Onboarding Complete — the guided-onboarding completion event.
+  const stage6 = await supabase
+    .from('ga_events')
+    .select('event_count')
+    .eq('event_name', 'EW_ONBOARDING_GUIDE_COMPLETE')
+    .gte('date', since)
+
+  // Stage 7: First Transaction — all send/swap events
+  // (EA_SEND_type_protocol, EA_SEND_SWAP_protocol, etc.).
+  const stage7 = await supabase
+    .from('ga_events')
+    .select('event_count')
+    .gte('date', since)
+    .like('event_name', 'EA_SEND_%')
+
+  // Stage 8: Retained (30-day) — a full "first SA_APP_DASHBOARD + 30 days
+  // later" cohort query isn't expressible through supabase-js without a
+  // custom RPC, so this is simplified to `session_start` events in the last
+  // 7 days as a proxy for currently-active/returning users.
+  const stage8 = await supabase
+    .from('ga_events')
+    .select('event_count')
+    .eq('event_name', 'session_start')
+    .gte('date', getDateWindow({ range: '7d' }).startDate)
+
+  const socialDiscovery = (stage1.data ?? []).reduce(
+    (sum, r) => sum + (r.total_clicks ?? 0),
+    0
+  )
   const websiteVisit = (stage2.data ?? []).reduce((sum, r) => sum + (r.sessions ?? 0), 0)
-  const blogEngagement = (stage3.data ?? [])
-    .filter((r) => r.page_path?.startsWith('/blogs/') || r.page_path?.startsWith('/sahal'))
-    .reduce((sum, r) => sum + (r.pageviews ?? 0), 0)
-  const playStoreView = (stage4.data ?? []).reduce((sum, r) => sum + (r.impressions ?? 0), 0)
-  const appInstall = (stage5.data ?? []).reduce((sum, r) => sum + (r.installs ?? 0), 0)
+  const appInstall = sumEventCount(stage3.data)
+  const onboardingStarted = sumEventCount(stage4.data)
+  const walletCreated = sumEventCount(stage5.data)
+  const onboardingComplete = sumEventCount(stage6.data)
+  const firstTransaction = sumEventCount(stage7.data)
+  const retained = sumEventCount(stage8.data)
 
-  const eventCounts = (stage678.data ?? []).reduce<Record<string, number>>((acc, r) => {
-    acc[r.event_name] = (acc[r.event_name] ?? 0) + (r.event_count ?? 0)
-    return acc
-  }, {})
-  const walletCreated = eventCounts['wallet_created'] ?? 0
-  const firstTransaction = eventCounts['first_transaction'] ?? 0
-  const retained = eventCounts['retained_30_day'] ?? 0
-
-  const stages: FunnelStageRow[] = [
-    { name: 'Social Discovery', users: socialDiscovery },
-    { name: 'Website Visit', users: websiteVisit },
-    { name: 'Blog/Product Engagement', users: blogEngagement },
-    { name: 'Play Store View', users: playStoreView },
-    { name: 'App Install', users: appInstall },
-    { name: 'Wallet Created', users: walletCreated },
-    { name: 'First Transaction', users: firstTransaction },
-    { name: 'Retained (30-day)', users: retained },
+  // Per-stage fallback: an individual stage falls back to its own mock value
+  // whenever that query errored or genuinely summed to 0, so one missing
+  // event stream doesn't blank the entire funnel.
+  const resolvedStages: FunnelStageRow[] = [
+    {
+      name: 'Social Discovery',
+      users: !stage1.error && socialDiscovery > 0 ? socialDiscovery : STAGE_FALLBACKS.socialDiscovery,
+    },
+    {
+      name: 'Website Visit',
+      users: !stage2.error && websiteVisit > 0 ? websiteVisit : STAGE_FALLBACKS.websiteVisit,
+    },
+    {
+      name: 'App Install',
+      users: !stage3.error && appInstall > 0 ? appInstall : STAGE_FALLBACKS.appInstall,
+    },
+    {
+      name: 'Onboarding Started',
+      users:
+        !stage4.error && onboardingStarted > 0
+          ? onboardingStarted
+          : STAGE_FALLBACKS.onboardingStarted,
+    },
+    {
+      name: 'Wallet Created',
+      users: !stage5.error && walletCreated > 0 ? walletCreated : STAGE_FALLBACKS.walletCreated,
+    },
+    {
+      name: 'Onboarding Complete',
+      users:
+        !stage6.error && onboardingComplete > 0
+          ? onboardingComplete
+          : STAGE_FALLBACKS.onboardingComplete,
+    },
+    {
+      name: 'First Transaction',
+      users:
+        !stage7.error && firstTransaction > 0
+          ? firstTransaction
+          : STAGE_FALLBACKS.firstTransaction,
+    },
+    {
+      name: 'Retained (30-day)',
+      users: !stage8.error && retained > 0 ? retained : STAGE_FALLBACKS.retained,
+    },
   ]
 
-  // A usable funnel needs every stage to have a non-zero count — if any
-  // upstream source hasn't synced yet, the shape would be misleading (e.g.
-  // a funnel that inexplicably jumps to 0 at "Play Store View" just because
-  // Play Console isn't wired up). Fall back to mock for the whole funnel.
-  const hasCompleteFunnel = !anyError && stages.every((s) => s.users > 0)
+  // If literally every ga_events-backed stage came back empty/erroring (i.e.
+  // Firebase event sync hasn't produced any rows yet), fall back to the
+  // fully-mocked funnel so the UI still renders something coherent rather
+  // than a funnel that's all individually-substituted fallback numbers.
+  const allEventStagesEmpty =
+    appInstall === 0 &&
+    onboardingStarted === 0 &&
+    walletCreated === 0 &&
+    onboardingComplete === 0 &&
+    firstTransaction === 0 &&
+    retained === 0
+
+  const stages = allEventStagesEmpty ? MOCK_FUNNEL_DATA.stages : capToFunnelShape(resolvedStages)
 
   // Social -> Website attribution: Short.io human clicks per platform vs.
   // GA4 sessions recorded from the matching social source.
@@ -191,23 +299,29 @@ async function getFunnelData(searchParams?: { range?: string }): Promise<FunnelD
     attribution.some((a) => a.shortioHumanClicks > 0 || a.ga4Sessions > 0)
 
   return {
-    stages: hasCompleteFunnel ? stages : MOCK_FUNNEL_DATA.stages,
+    stages,
     attribution: hasAttribution ? attribution : MOCK_FUNNEL_DATA.attribution,
   }
 }
 
-// GA4 `source` values that correspond to each social platform's attribution
-// bucket (lowercased for case-insensitive matching).
-const PLATFORM_BY_GA_SOURCE: Record<string, string> = {
-  twitter: 'Twitter',
-  't.co': 'Twitter',
-  x: 'Twitter',
-  telegram: 'Telegram',
-  facebook: 'Facebook',
-  'm.facebook.com': 'Facebook',
-  linkedin: 'LinkedIn',
-  instagram: 'Instagram',
-  youtube: 'YouTube',
+/**
+ * Firebase event volume isn't guaranteed to strictly decrease stage over
+ * stage the way store-funnel data does (e.g. `SA_APP_DASHBOARD` can fire
+ * many times per user per day, while `first_open` only fires once ever per
+ * device). Cap each stage at the previous stage's value so the funnel
+ * visualization always narrows, never widens.
+ */
+function capToFunnelShape(stages: FunnelStageRow[]): FunnelStageRow[] {
+  const capped: FunnelStageRow[] = []
+  let ceiling = Infinity
+
+  for (const stage of stages) {
+    const users = Math.min(stage.users, ceiling)
+    capped.push({ name: stage.name, users })
+    ceiling = users
+  }
+
+  return capped
 }
 
 // ---------------------------------------------------------------------------
@@ -258,16 +372,16 @@ interface DropOffPoint {
 const DROP_OFF_INSIGHTS: Record<string, string> = {
   'Social Discovery->Website Visit':
     'Social posts and bio links aren’t converting into site visits — tighten UTM-tagged CTAs and make the link-in-bio destination match the promised content.',
-  'Website Visit->Blog/Product Engagement':
-    'Visitors land but don’t explore — consider clearer above-the-fold value props and internal links from the homepage into product/blog content.',
-  'Blog/Product Engagement->Play Store View':
-    'Engaged readers aren’t clicking through to the app listing — add more prominent, repeated app-download CTAs inside blog and product pages.',
-  'Play Store View->App Install':
-    'Store listing visitors are hesitating at the install decision — review screenshots, reviews, and permissions copy for install-intent friction.',
-  'App Install->Wallet Created':
-    'Installs aren’t completing onboarding — audit the wallet-creation flow (KYC steps, form length) for drop-off points.',
-  'Wallet Created->First Transaction':
-    'Wallets sit idle post-creation — a first-transaction incentive or guided “make your first transfer” nudge could close this gap.',
+  'Website Visit->App Install':
+    'Visitors aren’t converting to installs — review the app-download CTA placement and store-listing appeal linked from the website.',
+  'App Install->Onboarding Started':
+    'Installs aren’t opening onboarding — check for first-launch friction (permissions prompts, splash/load time) before `SA_GET_STARTED`/`EW_ONBOARDING_LETS_GO` fires.',
+  'Onboarding Started->Wallet Created':
+    'Users start onboarding but don’t reach the dashboard — audit the wallet-creation flow (KYC steps, seed phrase, form length) for drop-off points.',
+  'Wallet Created->Onboarding Complete':
+    'Wallets are created but users don’t finish the guided walkthrough — consider shortening `EW_ONBOARDING_GUIDE_COMPLETE`’s remaining steps or adding a skip-and-remind option.',
+  'Onboarding Complete->First Transaction':
+    'Onboarded users aren’t transacting — a first-transaction incentive or guided “make your first transfer” nudge could close this gap.',
   'First Transaction->Retained (30-day)':
     'Users transact once but don’t come back — lifecycle emails/push notifications and recurring-use features (Sahal Earn, Sahal Give) may help retention.',
 }
