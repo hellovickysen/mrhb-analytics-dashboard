@@ -182,12 +182,21 @@ export async function fetchAllShortIOData(
     const clickRows: Record<string, any>[] = []
     const today = new Date().toISOString().slice(0, 10)
 
-    // Summary row with totals
+    // Calculate human click ratio for estimating daily human clicks.
+    // The Short.io API only gives human clicks as a period total, not
+    // per-day. We distribute proportionally across daily rows so the
+    // date range picker works correctly.
+    const totalClicks = stats.clicks || 1
+    const totalHuman = stats.humanClicks || 0
+    const humanRatio = totalHuman / totalClicks
+
+    // Overwrite any old domain_total row with human_clicks=0 so it doesn't
+    // inflate date-range queries. Human clicks are now in daily rows instead.
     clickRows.push({
       date: today,
       link_id: 'domain_total',
       total_clicks: stats.clicks || 0,
-      human_clicks: stats.humanClicks || 0,
+      human_clicks: 0,
       country: 'ALL',
       city: 'ALL',
       os: 'ALL',
@@ -282,16 +291,19 @@ export async function fetchAllShortIOData(
       }
     }
 
-    // Daily time-series rows
+    // Daily time-series rows — PRIMARY data source for date-range queries.
+    // Human clicks estimated per day using the period-wide ratio since
+    // Short.io's API only returns human clicks as a period total.
     if (stats.clickStatistics?.datasets?.[0]?.data) {
       for (const point of stats.clickStatistics.datasets[0].data) {
         const dateStr = (point.x || '').slice(0, 10)
+        const dailyTotal = point.y || 0
         if (dateStr) {
           clickRows.push({
             date: dateStr,
             link_id: 'domain_daily',
-            total_clicks: point.y || 0,
-            human_clicks: 0,
+            total_clicks: dailyTotal,
+            human_clicks: Math.round(dailyTotal * humanRatio),
             country: 'ALL',
             city: 'ALL',
             os: 'ALL',
