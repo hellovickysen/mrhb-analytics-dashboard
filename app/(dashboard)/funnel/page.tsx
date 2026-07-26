@@ -235,7 +235,7 @@ async function getFunnelData(searchParams?: { range?: string }): Promise<FunnelD
     {
       name: 'First Transaction',
       users:
-        !stage7.error && firstTransaction > 0
+        firstTransaction > 0
           ? firstTransaction
           : STAGE_FALLBACKS.firstTransaction,
     },
