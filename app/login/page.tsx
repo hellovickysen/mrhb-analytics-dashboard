@@ -4,7 +4,7 @@ import { useState, FormEvent } from 'react'
 import { useRouter } from 'next/navigation'
 import { MRHB_LOGO } from '@/lib/utils/logo'
 
-const ALLOWED_NAMES = ['varun']
+const ALLOWED_NAMES = ['varun', 'mrhb']
 
 export default function LoginPage() {
   const [name, setName] = useState('')
