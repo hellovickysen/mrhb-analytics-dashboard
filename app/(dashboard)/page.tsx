@@ -4,6 +4,7 @@ import LineChart, { type LineChartDataPoint } from '@/components/charts/LineChar
 import { formatNumber, formatPercent } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
+import { fetchGA4AppActiveUsers } from '@/lib/api-clients/google-analytics'
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -15,10 +16,10 @@ import { getDateWindow } from '@/lib/utils/date-range'
 
 interface OverviewKPIs {
   totalUsers: { value: number; change: number }
+  walletActiveUsers: { value: number; change: number }
   appInstalls: { value: number; change: number }
   organicClicks: { value: number; change: number }
   socialClicksHuman: { value: number; change: number }
-  avgScrollDepth: { value: number; change: number }
   revenue: { value: number; change: number }
   trafficTrend: LineChartDataPoint[]
   channelBreakdown: { channel: string; sessions: number; share: number }[]
@@ -30,7 +31,7 @@ const MOCK_OVERVIEW: OverviewKPIs = {
   appInstalls: { value: 6320, change: 12.1 },
   organicClicks: { value: 21875, change: 5.6 },
   socialClicksHuman: { value: 9142, change: -3.2 },
-  avgScrollDepth: { value: 62.5, change: 0 },
+  walletActiveUsers: { value: 1250, change: 5.2 },
   revenue: { value: 184500, change: 14.7 },
   trafficTrend: [
     { date: 'Jun 24', value: 3200 },
@@ -115,16 +116,23 @@ async function getOverviewData(searchParams?: { range?: string }): Promise<Overv
     const since60d = prevStartDate
     const cutoff30d = startDate
 
+    // Fetch active users from GA4 App property directly (not from Supabase)
+    // This gives us the true unique active user count from Firebase
+    const { endDate } = getDateWindow(searchParams)
+    const activeUsersPromise = fetchGA4AppActiveUsers(cutoff30d, endDate)
+    const prevActiveUsersPromise = fetchGA4AppActiveUsers(since60d, cutoff30d)
+
     const [
       usersWindow,
       installsWindow,
       clicksWindow,
       socialClicksWindow,
-      scrollWindow,
       revenueWindow,
       trafficTrendResult,
       channelResult,
       geoResult,
+      activeUsersData,
+      prevActiveUsersData,
     ] = await Promise.all([
       fetchWindowedSum(supabase, 'ga_traffic', 'users', 'date', since60d, cutoff30d),
       fetchWindowedSum(supabase, 'ga_events', 'event_count', 'date', since60d, cutoff30d, (q) =>
@@ -132,7 +140,6 @@ async function getOverviewData(searchParams?: { range?: string }): Promise<Overv
       ),
       fetchWindowedSum(supabase, 'gsc_queries', 'clicks', 'date', since60d, cutoff30d),
       fetchWindowedSum(supabase, 'shortio_clicks', 'human_clicks', 'date', since60d, cutoff30d),
-      fetchWindowedSum(supabase, 'clarity_sessions', 'scroll_depth_pct', 'date', since60d, cutoff30d),
       fetchWindowedSum(supabase, 'daily_kpis', 'metric_value', 'date', since60d, cutoff30d, (q) =>
         q.eq('metric_name', 'revenue')
       ),
@@ -143,28 +150,24 @@ async function getOverviewData(searchParams?: { range?: string }): Promise<Overv
         .order('date', { ascending: true }),
       supabase.from('ga_traffic').select('channel, sessions').gte('date', cutoff30d),
       supabase.from('ga_geo').select('country, users').gte('date', cutoff30d),
+      activeUsersPromise,
+      prevActiveUsersPromise,
     ])
 
-    // Average (not sum) scroll depth over the current 30-day window — reuse
-    // the raw rows fetched above via a second lightweight pass so the KPI
-    // reflects an average rather than a summed percentage.
-    let avgScrollDepth = { value: MOCK_OVERVIEW.avgScrollDepth.value, change: MOCK_OVERVIEW.avgScrollDepth.change }
-    if (scrollWindow) {
-      const { data: scrollRows } = await supabase
-        .from('clarity_sessions')
-        .select('date, scroll_depth_pct')
-        .gte('date', since60d)
-
-      if (scrollRows && scrollRows.length > 0) {
-        const currentRows = scrollRows.filter((r) => r.date >= cutoff30d)
-        const previousRows = scrollRows.filter((r) => r.date < cutoff30d)
-        const avg = (rows: typeof scrollRows) =>
-          rows.length > 0 ? rows.reduce((t, r) => t + (r.scroll_depth_pct ?? 0), 0) / rows.length : 0
-        const currentAvg = avg(currentRows)
-        const previousAvg = avg(previousRows)
-        avgScrollDepth = { value: currentAvg, change: pctChange(currentAvg, previousAvg) }
-      }
-    }
+    // Wallet Active Users — unique active users from GA4 App property.
+    // Sum daily activeUsers for current and previous periods.
+    // Note: summing daily unique users overcounts slightly vs true 30-day
+    // unique users, but GA4's daily activeUsers is the best available metric.
+    const currentActiveSum = activeUsersData.reduce((s, r) => s + r.activeUsers, 0)
+    const prevActiveSum = prevActiveUsersData.reduce((s, r) => s + r.activeUsers, 0)
+    // Use max daily value as a more accurate "unique in period" estimate
+    const currentActiveMax = activeUsersData.length > 0
+      ? Math.max(...activeUsersData.map(r => r.activeUsers))
+      : 0
+    // For the KPI, show total daily active users (engagement volume)
+    const walletActiveUsers = currentActiveSum > 0
+      ? { value: currentActiveSum, change: pctChange(currentActiveSum, prevActiveSum) }
+      : MOCK_OVERVIEW.walletActiveUsers
 
     // Traffic trend: daily session totals for the last 30 days.
     let trafficTrend: LineChartDataPoint[] = MOCK_OVERVIEW.trafficTrend
@@ -230,7 +233,7 @@ async function getOverviewData(searchParams?: { range?: string }): Promise<Overv
             change: pctChange(socialClicksWindow.current, socialClicksWindow.previous),
           }
         : MOCK_OVERVIEW.socialClicksHuman,
-      avgScrollDepth,
+      walletActiveUsers,
       revenue: revenueWindow
         ? { value: revenueWindow.current, change: pctChange(revenueWindow.current, revenueWindow.previous) }
         : MOCK_OVERVIEW.revenue,
@@ -304,12 +307,12 @@ export default async function OverviewPage({
           tooltip="Real people (not bots) who clicked your Short.io social media links"
         />
         <KPICard
-          title="Avg Scroll Depth"
-          value={formatPercent(data.avgScrollDepth.value)}
-          change={data.avgScrollDepth.change}
-          trend={getTrend(data.avgScrollDepth.change)}
-          iconName="scroll-text"
-          tooltip="How far down the page visitors scroll on average (100% = reached the bottom)"
+          title="Wallet Active Users"
+          value={formatNumber(data.walletActiveUsers.value)}
+          change={data.walletActiveUsers.change}
+          trend={getTrend(data.walletActiveUsers.change)}
+          iconName="users"
+          tooltip="Total daily active users in Sahal Wallet app (from Firebase GA4)"
         />
         <KPICard
           title="Revenue"

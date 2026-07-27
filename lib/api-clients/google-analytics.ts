@@ -473,3 +473,37 @@ export async function fetchGA4AppTraffic(
     return []
   }
 }
+
+/* ------------------------------------------------------------------------ */
+/*  fetchGA4AppActiveUsers — Sahal Wallet active users                       */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Fetches the active user count from the Sahal Wallet Firebase GA4 property.
+ * Returns daily active user counts for the given date range.
+ * GA4's `activeUsers` metric counts unique users who had an engaged session.
+ */
+export async function fetchGA4AppActiveUsers(
+  startDate: string,
+  endDate: string
+): Promise<{ date: string; activeUsers: number }[]> {
+  try {
+    const client = getAnalyticsDataClient()
+    const property = getGA4AppPropertyResource()
+    if (!client || !property) return []
+
+    const rows = await runPaginatedReport(client, property, {
+      dateRanges: [{ startDate, endDate }],
+      dimensions: [{ name: 'date' }],
+      metrics: [{ name: 'activeUsers' }],
+    })
+
+    return rows.map((row) => ({
+      date: formatGA4Date(dim(row, 0)),
+      activeUsers: toNumber(metric(row, 0)),
+    }))
+  } catch (error) {
+    console.error('[google-analytics] fetchGA4AppActiveUsers failed:', error)
+    return []
+  }
+}
