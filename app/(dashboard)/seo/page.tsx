@@ -11,14 +11,25 @@ import { getDateWindow } from '@/lib/utils/date-range'
 // ---------------------------------------------------------------------------
 // Data fetching
 // ---------------------------------------------------------------------------
-// Server Component — reads from `gsc_queries` (synced daily from the Search
-// Console API — see lib/types/index.ts `GSCQuery`) for KPIs, the
-// impressions/clicks trend, CTR trend, top queries, and position
-// distribution, and from `gsc_pages` (`GSCPage`) for the top-pages table.
-// PostgREST has no server-side GROUP BY, so each query below pulls raw rows
-// for the window and aggregates/buckets them in JS. Every aggregation falls
-// back to the matching MOCK_SEO slice when Supabase returns an error or zero
-// rows (missing table, RLS not yet configured, or a genuinely quiet period).
+// Server Component — Search Console performance.
+//
+// HEADLINE totals, the impressions/clicks trend, CTR trend, top pages and the
+// position distribution all come from `gsc_pages` (see lib/types/index.ts
+// `GSCPage`). We deliberately do NOT derive the headline totals from
+// `gsc_queries`: Google heavily ANONYMIZES the query dimension (rare queries
+// are withheld), so summing query rows badly under-counts site totals
+// (observed 803 vs Search Console's ~5,040). The page dimension is far more
+// complete and matches Search Console.
+//
+// CTR and Average Position are IMPRESSION-WEIGHTED (CTR = total clicks / total
+// impressions; position = sum(position*impressions)/sum(impressions)) — never
+// a simple mean of per-row values, which would over-weight tiny queries.
+//
+// The Top Queries table still comes from `gsc_queries` (that's the query
+// breakdown by definition), also with weighted CTR/position.
+//
+// Reads are bounded on both ends of the window. Falls back to clearly-labelled
+// sample data (isSourced=false) only when Search Console has no page rows.
 
 interface QueryRow {
   query: string
@@ -46,6 +57,7 @@ interface SeoData {
   topQueries: QueryRow[]
   topPages: PageRow[]
   positionDistribution: BarChartDataPoint[]
+  isSourced: boolean
 }
 
 function buildImpressionsClicksTrend(): AreaChartDataPoint[] {
@@ -133,12 +145,20 @@ const MOCK_SEO: SeoData = {
     { label: 'Position 21-50', value: 134 },
     { label: 'Position 50+', value: 87 },
   ],
+  isSourced: false,
 }
 
-/** Percent change of `current` vs `previous`, guarding divide-by-zero. */
+/**
+ * Percent change of `current` vs `previous`. Returns 0 (neutral) when there's
+ * no comparable baseline (previous is 0 — e.g. the prior window predates the
+ * data) or when the swing is implausibly large (|change| > 500%), rather than
+ * showing a misleading 100%/five-figure percentage.
+ */
 function pctChange(current: number, previous: number): number {
-  if (!previous) return current > 0 ? 100 : 0
-  return ((current - previous) / previous) * 100
+  if (!previous) return 0
+  const pct = ((current - previous) / previous) * 100
+  if (Math.abs(pct) > 500) return 0
+  return pct
 }
 
 /** Formats a `YYYY-MM-DD` string as "Jul 23" to match the mock trend labels. */
@@ -151,10 +171,8 @@ function formatShortDate(dateStr: string): string {
 interface GscQueryWindowRow {
   date: string
   query: string
-  page: string
   impressions: number
   clicks: number
-  ctr: number
   position: number
 }
 
@@ -163,62 +181,76 @@ interface GscPageWindowRow {
   page: string
   impressions: number
   clicks: number
-  ctr: number
   position: number
+}
+
+const RANGE_LABELS: Record<string, string> = {
+  today: 'Today',
+  yesterday: 'Yesterday',
+  '7d': 'Last 7 Days',
+  '30d': 'Last 30 Days',
+  '90d': 'Last 90 Days',
+}
+
+const sumImpr = (rows: { impressions: number }[]) => rows.reduce((t, r) => t + (r.impressions ?? 0), 0)
+const sumClicks = (rows: { clicks: number }[]) => rows.reduce((t, r) => t + (r.clicks ?? 0), 0)
+const weightedCtr = (rows: { impressions: number; clicks: number }[]) => {
+  const i = sumImpr(rows)
+  return i > 0 ? (sumClicks(rows) / i) * 100 : 0
+}
+const weightedPosition = (rows: { impressions: number; position: number }[]) => {
+  const i = sumImpr(rows)
+  return i > 0 ? rows.reduce((t, r) => t + (r.position ?? 0) * (r.impressions ?? 0), 0) / i : 0
 }
 
 async function getSeoData(searchParams?: { range?: string }): Promise<SeoData> {
   try {
     const supabase = createServiceClient()
+    const { startDate, endDate, prevStartDate } = getDateWindow(searchParams)
 
-    const { startDate, prevStartDate } = getDateWindow(searchParams)
-    const since60d = prevStartDate
-    const cutoff30d = startDate
-
-    const [queriesResult, pagesResult] = await Promise.all([
-      supabase
-        .from('gsc_queries')
-        .select('date, query, page, impressions, clicks, ctr, position')
-        .gte('date', since60d)
-        .order('date', { ascending: true }),
+    const [pagesResult, queriesResult] = await Promise.all([
+      // Pages carry current + previous window (for % change), both ends bounded.
       supabase
         .from('gsc_pages')
-        .select('date, page, impressions, clicks, ctr, position')
-        .gte('date', cutoff30d),
+        .select('date, page, impressions, clicks, position')
+        .gte('date', prevStartDate)
+        .lte('date', endDate)
+        .order('date', { ascending: true }),
+      // Queries only need the current window (for the Top Queries table).
+      supabase
+        .from('gsc_queries')
+        .select('date, query, impressions, clicks, position')
+        .gte('date', startDate)
+        .lte('date', endDate),
     ])
 
-    const queryRowsRaw = (
-      !queriesResult.error && queriesResult.data ? (queriesResult.data as GscQueryWindowRow[]) : []
-    ).filter((r) => r.date)
+    const pageRows = (!pagesResult.error && pagesResult.data ? (pagesResult.data as GscPageWindowRow[]) : []).filter(
+      (r) => r.date
+    )
+    const queryRows = (!queriesResult.error && queriesResult.data ? (queriesResult.data as GscQueryWindowRow[]) : []).filter(
+      (r) => r.date
+    )
 
-    const pageRowsRaw = !pagesResult.error && pagesResult.data ? (pagesResult.data as GscPageWindowRow[]) : []
-
-    // No `gsc_queries` history at all (missing table / RLS / empty DB) —
-    // fall back to the full mock payload rather than mixing partial data.
-    if (queryRowsRaw.length === 0) {
-      return MOCK_SEO
+    const isSourced = pageRows.length > 0
+    if (!isSourced) {
+      return { ...MOCK_SEO, isSourced: false }
     }
 
-    const currentRows = queryRowsRaw.filter((r) => r.date >= cutoff30d)
-    const previousRows = queryRowsRaw.filter((r) => r.date < cutoff30d)
+    const currentPages = pageRows.filter((r) => r.date >= startDate)
+    const previousPages = pageRows.filter((r) => r.date < startDate)
 
-    const sumBy = (rows: GscQueryWindowRow[], key: 'impressions' | 'clicks') =>
-      rows.reduce((total, row) => total + (row[key] ?? 0), 0)
-    const avgBy = (rows: GscQueryWindowRow[], key: 'ctr' | 'position') =>
-      rows.length > 0 ? rows.reduce((total, row) => total + (row[key] ?? 0), 0) / rows.length : 0
+    const impressionsCurrent = sumImpr(currentPages)
+    const impressionsPrevious = sumImpr(previousPages)
+    const clicksCurrent = sumClicks(currentPages)
+    const clicksPrevious = sumClicks(previousPages)
+    const ctrCurrent = weightedCtr(currentPages)
+    const ctrPrevious = weightedCtr(previousPages)
+    const positionCurrent = weightedPosition(currentPages)
+    const positionPrevious = weightedPosition(previousPages)
 
-    const impressionsCurrent = sumBy(currentRows, 'impressions')
-    const impressionsPrevious = sumBy(previousRows, 'impressions')
-    const clicksCurrent = sumBy(currentRows, 'clicks')
-    const clicksPrevious = sumBy(previousRows, 'clicks')
-    const ctrCurrent = avgBy(currentRows, 'ctr')
-    const ctrPrevious = avgBy(previousRows, 'ctr')
-    const positionCurrent = avgBy(currentRows, 'position')
-    const positionPrevious = avgBy(previousRows, 'position')
-
-    // Impressions vs clicks trend — daily totals for the current 30-day window.
+    // Impressions vs clicks trend — daily totals from gsc_pages (current window).
     const trendByDate = new Map<string, { impressions: number; clicks: number }>()
-    for (const row of currentRows) {
+    for (const row of currentPages) {
       const entry = trendByDate.get(row.date) ?? { impressions: 0, clicks: 0 }
       entry.impressions += row.impressions ?? 0
       entry.clicks += row.clicks ?? 0
@@ -229,80 +261,57 @@ async function getSeoData(searchParams?: { range?: string }): Promise<SeoData> {
       const entry = trendByDate.get(date)!
       return { date: formatShortDate(date), value: entry.impressions, secondaryValue: entry.clicks }
     })
-
-    // CTR trend — daily average CTR across queries for the current window.
-    const ctrByDate = new Map<string, { sum: number; count: number }>()
-    for (const row of currentRows) {
-      const entry = ctrByDate.get(row.date) ?? { sum: 0, count: 0 }
-      entry.sum += row.ctr ?? 0
-      entry.count += 1
-      ctrByDate.set(row.date, entry)
-    }
+    // CTR trend — weighted (clicks/impressions) per day, not a mean of ratios.
     const ctrTrend: LineChartDataPoint[] = sortedDates.map((date) => {
-      const entry = ctrByDate.get(date)
-      return { date: formatShortDate(date), value: entry && entry.count > 0 ? entry.sum / entry.count : 0 }
+      const entry = trendByDate.get(date)!
+      return { date: formatShortDate(date), value: entry.impressions > 0 ? (entry.clicks / entry.impressions) * 100 : 0 }
     })
 
-    // Top queries — aggregate impressions/clicks per query, average ctr/position,
-    // sorted by impressions desc, top 15.
-    const queryAgg = new Map<
-      string,
-      { impressions: number; clicks: number; ctrSum: number; positionSum: number; count: number }
-    >()
-    for (const row of currentRows) {
-      const entry =
-        queryAgg.get(row.query) ?? { impressions: 0, clicks: 0, ctrSum: 0, positionSum: 0, count: 0 }
+    // Top queries — from gsc_queries (current), weighted CTR/position per query.
+    const queryAgg = new Map<string, { impressions: number; clicks: number; posW: number }>()
+    for (const row of queryRows) {
+      const entry = queryAgg.get(row.query) ?? { impressions: 0, clicks: 0, posW: 0 }
       entry.impressions += row.impressions ?? 0
       entry.clicks += row.clicks ?? 0
-      entry.ctrSum += row.ctr ?? 0
-      entry.positionSum += row.position ?? 0
-      entry.count += 1
+      entry.posW += (row.position ?? 0) * (row.impressions ?? 0)
       queryAgg.set(row.query, entry)
     }
     const topQueries: QueryRow[] = Array.from(queryAgg.entries())
-      .map(([query, agg]) => ({
+      .map(([query, a]) => ({
         query,
-        impressions: agg.impressions,
-        clicks: agg.clicks,
-        ctr: agg.count > 0 ? agg.ctrSum / agg.count : 0,
-        position: agg.count > 0 ? agg.positionSum / agg.count : 0,
+        impressions: a.impressions,
+        clicks: a.clicks,
+        ctr: a.impressions > 0 ? (a.clicks / a.impressions) * 100 : 0,
+        position: a.impressions > 0 ? a.posW / a.impressions : 0,
       }))
       .sort((a, b) => b.impressions - a.impressions)
       .slice(0, 15)
 
-    // Top pages — from `gsc_pages`, aggregated per page, sorted by impressions desc.
-    let topPages: PageRow[] = MOCK_SEO.topPages
-    if (pageRowsRaw.length > 0) {
-      const pageAgg = new Map<
-        string,
-        { impressions: number; clicks: number; ctrSum: number; positionSum: number; count: number }
-      >()
-      for (const row of pageRowsRaw) {
-        const entry =
-          pageAgg.get(row.page) ?? { impressions: 0, clicks: 0, ctrSum: 0, positionSum: 0, count: 0 }
-        entry.impressions += row.impressions ?? 0
-        entry.clicks += row.clicks ?? 0
-        entry.ctrSum += row.ctr ?? 0
-        entry.positionSum += row.position ?? 0
-        entry.count += 1
-        pageAgg.set(row.page, entry)
-      }
-      topPages = Array.from(pageAgg.entries())
-        .map(([page, agg]) => ({
-          page,
-          impressions: agg.impressions,
-          clicks: agg.clicks,
-          ctr: agg.count > 0 ? agg.ctrSum / agg.count : 0,
-          position: agg.count > 0 ? agg.positionSum / agg.count : 0,
-        }))
-        .sort((a, b) => b.impressions - a.impressions)
-        .slice(0, 10)
+    // Top pages — from gsc_pages (current), weighted CTR/position per page.
+    const pageAgg = new Map<string, { impressions: number; clicks: number; posW: number }>()
+    for (const row of currentPages) {
+      const entry = pageAgg.get(row.page) ?? { impressions: 0, clicks: 0, posW: 0 }
+      entry.impressions += row.impressions ?? 0
+      entry.clicks += row.clicks ?? 0
+      entry.posW += (row.position ?? 0) * (row.impressions ?? 0)
+      pageAgg.set(row.page, entry)
     }
+    const topPages: PageRow[] = Array.from(pageAgg.entries())
+      .map(([page, a]) => ({
+        page,
+        impressions: a.impressions,
+        clicks: a.clicks,
+        ctr: a.impressions > 0 ? (a.clicks / a.impressions) * 100 : 0,
+        position: a.impressions > 0 ? a.posW / a.impressions : 0,
+      }))
+      .sort((a, b) => b.impressions - a.impressions)
+      .slice(0, 10)
 
-    // Position distribution — bucket each query row's position (current window).
+    // Position distribution — one entry per PAGE using its impression-weighted
+    // position (not per query-day row), bucketed.
     const buckets = { '1-3': 0, '4-10': 0, '11-20': 0, '21-50': 0, '50+': 0 }
-    for (const row of currentRows) {
-      const p = row.position ?? 0
+    for (const [, a] of pageAgg) {
+      const p = a.impressions > 0 ? a.posW / a.impressions : 0
       if (p <= 3) buckets['1-3'] += 1
       else if (p <= 10) buckets['4-10'] += 1
       else if (p <= 20) buckets['11-20'] += 1
@@ -322,16 +331,15 @@ async function getSeoData(searchParams?: { range?: string }): Promise<SeoData> {
       totalClicks: { value: clicksCurrent, change: pctChange(clicksCurrent, clicksPrevious) },
       avgCtr: { value: ctrCurrent, change: pctChange(ctrCurrent, ctrPrevious) },
       avgPosition: { value: positionCurrent, change: pctChange(positionCurrent, positionPrevious) },
-      impressionsClicksTrend: impressionsClicksTrend.length > 0 ? impressionsClicksTrend : MOCK_SEO.impressionsClicksTrend,
-      ctrTrend: ctrTrend.length > 0 ? ctrTrend : MOCK_SEO.ctrTrend,
+      impressionsClicksTrend,
+      ctrTrend,
       topQueries: topQueries.length > 0 ? topQueries : MOCK_SEO.topQueries,
       topPages,
       positionDistribution,
+      isSourced: true,
     }
   } catch {
-    // Network failure, missing env vars, or any other unexpected error —
-    // the UI must always render, so fall all the way back to mock data.
-    return MOCK_SEO
+    return { ...MOCK_SEO, isSourced: false }
   }
 }
 
@@ -339,22 +347,6 @@ function getTrend(change: number): 'up' | 'down' | 'flat' {
   if (change > 0) return 'up'
   if (change < 0) return 'down'
   return 'flat'
-}
-
-interface QueryTableRow {
-  query: string
-  impressions: string
-  clicks: string
-  ctr: string
-  position: string
-}
-
-interface PageTableRow {
-  page: string
-  impressions: string
-  clicks: string
-  ctr: string
-  position: string
 }
 
 const queryColumns: DataTableColumn[] = [
@@ -379,6 +371,7 @@ export default async function SeoPage({
   searchParams: { range?: string }
 }) {
   const data = await getSeoData(searchParams)
+  const rangeLabel = RANGE_LABELS[searchParams?.range ?? '30d'] ?? 'Last 30 Days'
 
   const queryRows = data.topQueries.map((row) => ({
     query: row.query,
@@ -400,6 +393,17 @@ export default async function SeoPage({
     <div>
       <Header title="SEO Performance" />
 
+      {/* Sourced-vs-sample state — mock is never presented as live */}
+      {!data.isSourced && (
+        <div className="mb-6 rounded-lg border border-amber-300 bg-amber-50 p-4">
+          <p className="text-sm font-semibold text-amber-800">Showing sample data</p>
+          <p className="mt-1 text-xs text-amber-700">
+            Live Search Console metrics are unavailable for this period. The figures below are
+            representative sample values, not sourced analytics. Run a sync to populate live data.
+          </p>
+        </div>
+      )}
+
       {/* KPI cards row — pass iconName strings, not components */}
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <KPICard
@@ -408,7 +412,7 @@ export default async function SeoPage({
           change={data.totalImpressions.change}
           trend={getTrend(data.totalImpressions.change)}
           iconName="search"
-          tooltip="How many times your pages appeared in Google search results"
+          tooltip="How many times your pages appeared in Google search results (from Search Console page data)"
         />
         <KPICard
           title="Total Clicks"
@@ -424,7 +428,7 @@ export default async function SeoPage({
           change={data.avgCtr.change}
           trend={getTrend(data.avgCtr.change)}
           iconName="trending-up"
-          tooltip="Click-through rate: percentage of impressions that resulted in a click. Higher is better"
+          tooltip="Click-through rate = total clicks / total impressions (impression-weighted). Higher is better"
         />
         <KPICard
           title="Avg Position"
@@ -432,7 +436,7 @@ export default async function SeoPage({
           change={data.avgPosition.change}
           trend={getTrend(-data.avgPosition.change)}
           iconName="globe"
-          tooltip="Average ranking position in Google search results. Lower is better (1 = top result)"
+          tooltip="Average ranking position (impression-weighted). Lower is better (1 = top result)"
         />
       </div>
 
@@ -440,7 +444,7 @@ export default async function SeoPage({
       <div className="mb-6">
         <AreaChart
           data={data.impressionsClicksTrend}
-          title="Impressions vs Clicks (Last 30 Days)"
+          title={`Impressions vs Clicks (${rangeLabel})`}
           color="#01A6FA"
           secondaryColor="#E5B897"
           seriesLabel="Impressions"
