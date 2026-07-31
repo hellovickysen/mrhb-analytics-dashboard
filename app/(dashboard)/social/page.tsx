@@ -262,11 +262,22 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
       secondaryValue: clicksByDate[date].human,
     }))
 
+  // The dimensional breakdown rows (by_referrer / by_country / by_os / etc.)
+  // are CUMULATIVE period snapshots written once per ingestion run, dated with
+  // the run day. Summing them across the date window would multiply every
+  // figure by the number of daily cron snapshots in range. So read ONLY the
+  // most recent snapshot for the platform / country / device breakdowns.
+  // (These reflect the latest full ingestion window and are not re-scaled per
+  // dashboard range — Short.io exposes period breakdowns only.)
+  const snapshotRows = clicks.filter((c) => c.link_id !== 'domain_daily')
+  const latestSnapshot = snapshotRows.reduce((max, c) => (c.date > max ? c.date : max), '')
+  const latestRows = snapshotRows.filter((c) => c.date === latestSnapshot)
+
   // Platform performance: the Short.io domain-statistics endpoint reports
   // per-referrer TOTAL clicks (bot+human) only — there is no per-referrer
   // human-click figure — so these cards show TOTAL clicks by platform,
   // sourced from the by_referrer breakdown rows.
-  const referrerRows = clicks.filter((c) => c.link_id === 'by_referrer')
+  const referrerRows = latestRows.filter((c) => c.link_id === 'by_referrer')
   const clicksByReferrer = referrerRows.reduce<Record<string, number>>((acc, c) => {
     if (!c.referrer) return acc
     acc[c.referrer] = (acc[c.referrer] ?? 0) + (c.total_clicks ?? 0)
@@ -284,7 +295,7 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
   )
 
   // Geographic breakdown: per-country TOTAL clicks from the by_country rows.
-  const countryRows = clicks.filter((c) => c.link_id === 'by_country')
+  const countryRows = latestRows.filter((c) => c.link_id === 'by_country')
   const clicksByCountry = countryRows.reduce<Record<string, number>>((acc, c) => {
     if (!c.country || c.country === 'ALL') return acc
     acc[c.country] = (acc[c.country] ?? 0) + (c.total_clicks ?? 0)
@@ -296,7 +307,7 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
     .map(([label, value]) => ({ label, value }))
 
   // Device split: per-OS TOTAL clicks from the by_os rows.
-  const osRows = clicks.filter((c) => c.link_id === 'by_os')
+  const osRows = latestRows.filter((c) => c.link_id === 'by_os')
   const clicksByOs = osRows.reduce<Record<string, number>>((acc, c) => {
     if (!c.os || c.os === 'ALL') return acc
     acc[c.os] = (acc[c.os] ?? 0) + (c.total_clicks ?? 0)
