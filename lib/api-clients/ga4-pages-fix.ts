@@ -71,21 +71,44 @@ export async function fetchGA4Pages(startDate: string, endDate: string): Promise
       if (page.length === 0 || offset >= total) break
     }
 
-    return rows.map((row): GA4PageRow => {
+    // Aggregate by (date, page_path). The pageTitle dimension can split one
+    // path into multiple rows (e.g. a page whose <title> changed), which would
+    // collide on the ga_pages unique key (date, page_path) and fail the upsert
+    // with "ON CONFLICT DO UPDATE command cannot affect row a second time".
+    // Collapse to one row per (date, page_path): sum pageviews, pageview-weight
+    // the avg time, and keep the title with the most views.
+    const agg = new Map<
+      string,
+      { date: string; page_path: string; page_title: string; titlePv: number; pageviews: number; timeW: number }
+    >()
+    for (const row of rows) {
       const dv = (i: number) => row.dimensionValues?.[i]?.value ?? ''
       const mv = (i: number) => toNumber(row.metricValues?.[i]?.value)
-      return {
-        date: formatGA4Date(dv(0)),
-        page_path: dv(1) || '/',
-        page_title: dv(2) || '(not set)',
-        pageviews: mv(0),
-        avg_time_on_page: mv(1),
-        // No GA4 Data API equivalent for exits/entrances; not used by the Blog
-        // page. Stored as 0 rather than crashing the whole fetch on a bad metric.
-        exit_rate: 0,
-        entrances: 0,
+      const date = formatGA4Date(dv(0))
+      const page_path = dv(1) || '/'
+      const page_title = dv(2) || '(not set)'
+      const pageviews = mv(0)
+      const key = `${date}|${page_path}`
+      const e = agg.get(key) ?? { date, page_path, page_title, titlePv: -1, pageviews: 0, timeW: 0 }
+      e.pageviews += pageviews
+      e.timeW += mv(1) * pageviews
+      if (pageviews > e.titlePv) {
+        e.page_title = page_title
+        e.titlePv = pageviews
       }
-    })
+      agg.set(key, e)
+    }
+
+    return Array.from(agg.values()).map((e): GA4PageRow => ({
+      date: e.date,
+      page_path: e.page_path,
+      page_title: e.page_title,
+      pageviews: e.pageviews,
+      avg_time_on_page: e.pageviews > 0 ? e.timeW / e.pageviews : 0,
+      // No GA4 Data API equivalent for exits/entrances; not used by the Blog page.
+      exit_rate: 0,
+      entrances: 0,
+    }))
   } catch (error) {
     console.error('[ga4-pages-fix] fetchGA4Pages failed:', error)
     return []
