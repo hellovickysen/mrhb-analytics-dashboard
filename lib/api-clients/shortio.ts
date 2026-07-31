@@ -293,39 +293,64 @@ export async function fetchAllShortIOData(
 
     // Daily time-series rows — PRIMARY data source for date-range queries.
     // Short.io returns clickStatistics.datasets[0].data as an array of
-    // { x: ISO-date, y: <clicks> } points where `y` is a NUMERIC STRING
-    // (e.g. "6"), not a number. Coerce with Number() before use — a strict
-    // `typeof y === 'number'` check silently drops every point and leaves
-    // the dashboard with zero domain_daily rows (the Social page then falls
-    // back to mock data). Distribute the period human-click total
-    // proportionally across days, with a rounding correction on the final
-    // day so the daily human clicks sum to the exact period total.
+    // { x: ISO-date, y: <clicks> } points. Two source facts drive this logic:
+    //
+    //   1. `y` is a NUMERIC STRING (e.g. "6"), not a number. Coerce with
+    //      Number() — a strict `typeof y === 'number'` check silently drops
+    //      every point, leaving zero domain_daily rows (the Social page then
+    //      falls back to mock data).
+    //
+    //   2. This daily chart is a SHAPE series only: its values do NOT sum to
+    //      the authoritative period totals. Empirically, for a window whose
+    //      stats.clicks=1202 / stats.humanClicks=261, the daily series summed
+    //      to just 139. Using the raw daily value as the day's total clicks
+    //      therefore understates totals AND makes distributed human clicks
+    //      exceed them (a >100% human rate).
+    //
+    // So we treat the daily points purely as WEIGHTS and allocate the real
+    // period totals (stats.clicks and stats.humanClicks) across the days,
+    // with a final-day remainder correction so the domain_daily rows sum
+    // EXACTLY to stats.clicks (total) and stats.humanClicks (human). Because
+    // both series use the same weights and totalClicks >= totalHuman, every
+    // day keeps total_clicks >= human_clicks (no per-day rate above 100%).
     const rawDailyPoints = stats.clickStatistics?.datasets?.[0]?.data
     if (Array.isArray(rawDailyPoints)) {
       const dailyPoints = rawDailyPoints
         .map((p: any) => ({ x: p?.x, y: Number(p?.y) }))
         .filter((p: { x: any; y: number }) => p.x && Number.isFinite(p.y))
 
-      const clicksSum = dailyPoints.reduce((s: number, p: { y: number }) => s + p.y, 0) || 1
+      const weightSum = dailyPoints.reduce((s: number, p: { y: number }) => s + p.y, 0)
+      const n = dailyPoints.length
+      const denom = weightSum > 0 ? weightSum : n || 1
 
-      let humanRemaining = totalHuman
+      // Cumulative-rounding allocation: walk the days accumulating weight and
+      // set each day's total to round(cumFraction * periodTotal) minus what's
+      // already been allocated. The final day's cumulative fraction is 1, so
+      // the rounded cumulative equals the exact period total — the daily rows
+      // sum EXACTLY to stats.clicks / stats.humanClicks with no drift, and a
+      // trailing zero-click day (e.g. "today") correctly receives 0.
+      let cumWeight = 0
+      let allocTotal = 0
+      let allocHuman = 0
 
-      for (let i = 0; i < dailyPoints.length; i++) {
+      for (let i = 0; i < n; i++) {
         const point = dailyPoints[i]
         const dateStr = String(point.x).slice(0, 10)
-        const dailyTotal = point.y
+        cumWeight += weightSum > 0 ? point.y : 1
+        const frac = cumWeight / denom
 
-        // Last day gets all remaining to guarantee exact total
-        const dailyHuman = i === dailyPoints.length - 1
-          ? humanRemaining
-          : Math.round((dailyTotal / clicksSum) * totalHuman)
-        humanRemaining -= dailyHuman
+        const targetTotal = Math.round(frac * totalClicks)
+        const targetHuman = Math.round(frac * totalHuman)
+        const dailyTotal = targetTotal - allocTotal
+        const dailyHuman = targetHuman - allocHuman
+        allocTotal = targetTotal
+        allocHuman = targetHuman
 
         if (dateStr) {
           clickRows.push({
             date: dateStr,
             link_id: 'domain_daily',
-            total_clicks: dailyTotal,
+            total_clicks: Math.max(0, dailyTotal),
             human_clicks: Math.max(0, dailyHuman),
             country: 'ALL',
             city: 'ALL',
