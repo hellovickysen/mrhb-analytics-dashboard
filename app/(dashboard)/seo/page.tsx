@@ -203,33 +203,50 @@ const weightedPosition = (rows: { impressions: number; position: number }[]) => 
   return i > 0 ? rows.reduce((t, r) => t + (r.position ?? 0) * (r.impressions ?? 0), 0) / i : 0
 }
 
+/**
+ * Fetches ALL rows for a date window, paginating past Supabase's 1,000-row-per
+ * -request cap. GSC tables hold thousands of page/query-day rows, so a single
+ * request (capped + ordered) would silently truncate the window.
+ */
+async function fetchAllGsc(
+  supabase: ReturnType<typeof createServiceClient>,
+  table: 'gsc_pages' | 'gsc_queries',
+  columns: string,
+  fromDate: string,
+  toDate: string
+): Promise<Record<string, any>[]> {
+  const all: Record<string, any>[] = []
+  const PAGE = 1000
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from(table)
+      .select(columns)
+      .gte('date', fromDate)
+      .lte('date', toDate)
+      .order('date', { ascending: true })
+      .range(from, from + PAGE - 1)
+    if (error) throw new Error(error.message)
+    const rows = data ?? []
+    all.push(...rows)
+    if (rows.length < PAGE) break
+  }
+  return all
+}
+
 async function getSeoData(searchParams?: { range?: string }): Promise<SeoData> {
   try {
     const supabase = createServiceClient()
     const { startDate, endDate, prevStartDate } = getDateWindow(searchParams)
 
-    const [pagesResult, queriesResult] = await Promise.all([
+    const [pageRowsAll, queryRowsAll] = await Promise.all([
       // Pages carry current + previous window (for % change), both ends bounded.
-      supabase
-        .from('gsc_pages')
-        .select('date, page, impressions, clicks, position')
-        .gte('date', prevStartDate)
-        .lte('date', endDate)
-        .order('date', { ascending: true }),
+      fetchAllGsc(supabase, 'gsc_pages', 'date, page, impressions, clicks, position', prevStartDate, endDate),
       // Queries only need the current window (for the Top Queries table).
-      supabase
-        .from('gsc_queries')
-        .select('date, query, impressions, clicks, position')
-        .gte('date', startDate)
-        .lte('date', endDate),
+      fetchAllGsc(supabase, 'gsc_queries', 'date, query, impressions, clicks, position', startDate, endDate),
     ])
 
-    const pageRows = (!pagesResult.error && pagesResult.data ? (pagesResult.data as GscPageWindowRow[]) : []).filter(
-      (r) => r.date
-    )
-    const queryRows = (!queriesResult.error && queriesResult.data ? (queriesResult.data as GscQueryWindowRow[]) : []).filter(
-      (r) => r.date
-    )
+    const pageRows = (pageRowsAll as GscPageWindowRow[]).filter((r) => r.date)
+    const queryRows = (queryRowsAll as GscQueryWindowRow[]).filter((r) => r.date)
 
     const isSourced = pageRows.length > 0
     if (!isSourced) {
