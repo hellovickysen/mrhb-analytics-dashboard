@@ -358,7 +358,58 @@ export async function fetchAllShortIOData(
       }
     }
 
-    console.log(`[shortio] Fetched ${links.length} links; 30d period total ${Number(stats.clicks) || 0} / human ${Number(stats.humanClicks) || 0}; ${days.length}-day per-day series; ${clickRows.length} click rows total`)
+    // Authoritative per-range period totals. Short.io's period "clicks" count
+    // does NOT equal the sum of its per-day series for longer windows: older
+    // per-day/granular data is decimated while the aggregate period counter is
+    // retained (e.g. 30d period=1223 vs per-day sum=524). The period figure is
+    // the number shown in Short.io's own dashboard, so we store one
+    // authoritative total per standard dashboard range and let the Social page
+    // read the matching one for its KPI cards. endDate is exclusive, so windows
+    // that should include today end at `tomorrow`.
+    const startOf = (daysAgo: number): string => iso(new Date(now.getTime() - daysAgo * DAY_MS))
+    const rangeDefs: { key: string; startDate: string; endDate: string }[] = [
+      { key: 'today', startDate: today, endDate: tomorrow },
+      { key: 'yesterday', startDate: startOf(1), endDate: today },
+      { key: '7d', startDate: startOf(7), endDate: tomorrow },
+      { key: '30d', startDate: startOf(30), endDate: tomorrow },
+      { key: '90d', startDate: startOf(90), endDate: tomorrow },
+    ]
+    const rangeResults = await Promise.all(
+      rangeDefs.map(async (r) => {
+        const params = new URLSearchParams({
+          period: 'custom',
+          startDate: r.startDate,
+          endDate: r.endDate,
+          tz: 'UTC',
+        })
+        try {
+          const s = await shortioFetch(
+            `${STATS_BASE}/statistics/domain/${domainId}?${params.toString()}`,
+            apiKey
+          )
+          return { key: r.key, total: Number(s.clicks) || 0, human: Number(s.humanClicks) || 0 }
+        } catch (err) {
+          console.error(`[shortio] range ${r.key} fetch failed:`, err)
+          return null
+        }
+      })
+    )
+    for (const rr of rangeResults) {
+      if (!rr) continue
+      clickRows.push({
+        date: today,
+        link_id: `range_${rr.key}`,
+        total_clicks: rr.total,
+        human_clicks: Math.min(Math.max(0, rr.human), rr.total),
+        country: 'ALL',
+        city: 'ALL',
+        os: 'ALL',
+        browser: 'ALL',
+        referrer: 'ALL',
+      })
+    }
+
+    console.log(`[shortio] Fetched ${links.length} links; 30d period total ${Number(stats.clicks) || 0} / human ${Number(stats.humanClicks) || 0}; ${days.length}-day per-day series; ${rangeResults.filter(Boolean).length} range totals; ${clickRows.length} click rows total`)
 
     return { links, clicks: clickRows }
   } catch (error) {

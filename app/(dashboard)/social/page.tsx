@@ -224,23 +224,27 @@ function formatTrendDate(dateStr: string): string {
 
 async function getSocialData(searchParams?: { range?: string }): Promise<SocialData> {
   const supabase = createServiceClient()
+  const rangeKey = searchParams?.range ?? '30d'
   const { startDate: since, endDate: until } = getDateWindow(searchParams)
 
   // Two independent reads, run in parallel:
-  //   1. domain_daily rows BOUNDED to the selected range [since, until] — the
-  //      authoritative per-day totals that drive the KPI cards and the trend.
-  //      Bounding on BOTH ends is what makes today / yesterday / 7d / 30d / 90d
-  //      correct; a gte-only filter would leak later days into "yesterday".
-  //   2. The dimensional breakdown snapshot (by_social / by_country / by_os) —
-  //      read as the LATEST snapshot independent of the selected range. These
-  //      are cumulative period snapshots written once per sync (never sum them
-  //      across dates), shown on the page as a fixed "last 30 days" reference
-  //      because Short.io only exposes period breakdowns.
+  //   1. domain_daily rows BOUNDED to [since, until] — the real per-day series
+  //      that draws the trend. Bounding on BOTH ends makes the trend match the
+  //      selected range (a gte-only filter leaked later days into "yesterday").
+  //      NOTE: Short.io decimates older granular data, so these per-day values
+  //      are the honest daily pattern but do NOT necessarily sum to the period
+  //      total for long windows — hence the authoritative headline below.
+  //   2. The latest sync snapshot — carries the AUTHORITATIVE per-range period
+  //      total (range_<key>, the figure shown in Short.io's own dashboard, used
+  //      for the KPI cards) plus the dimensional breakdowns (by_social /
+  //      by_country / by_os) shown as a fixed "last 30 days" reference. These
+  //      snapshot rows are written together each sync (dated the run day); read
+  //      only the most recent and never sum them across dates.
   const snapshotCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
     .toISOString()
     .slice(0, 10)
 
-  const [dailyRes, breakdownRes] = await Promise.all([
+  const [dailyRes, snapshotRes] = await Promise.all([
     supabase
       .from('shortio_clicks')
       .select('date, total_clicks, human_clicks')
@@ -249,28 +253,35 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
       .lte('date', until),
     supabase
       .from('shortio_clicks')
-      .select('date, link_id, total_clicks, country, os, referrer')
-      .in('link_id', ['by_social', 'by_country', 'by_os'])
+      .select('date, link_id, total_clicks, human_clicks, country, os, referrer')
+      .in('link_id', [`range_${rangeKey}`, 'by_social', 'by_country', 'by_os'])
       .gte('date', snapshotCutoff),
   ])
 
   const dailyClicks = dailyRes.data ?? []
-  const snapshotRows = breakdownRes.data ?? []
+  const snapshotAll = snapshotRes.data ?? []
 
-  // Keep only the most recent breakdown snapshot.
-  const latestSnapshot = snapshotRows.reduce((max, c) => (c.date > max ? c.date : max), '')
-  const latestRows = snapshotRows.filter((c) => c.date === latestSnapshot)
+  // Keep only the most recent sync snapshot.
+  const latestSnapshot = snapshotAll.reduce((max, c) => (c.date > max ? c.date : max), '')
+  const latestRows = snapshotAll.filter((c) => c.date === latestSnapshot)
+  const rangeRow = latestRows.find((c) => c.link_id === `range_${rangeKey}`)
 
   // "Sourced" means Short.io has synced at all. When true but the selected
   // range simply has no clicks, we show real zeros (with a friendly note) —
   // never the mock sample data.
-  const isSourced = !dailyRes.error && (dailyClicks.length > 0 || latestRows.length > 0)
+  const isSourced =
+    !snapshotRes.error && (rangeRow !== undefined || dailyClicks.length > 0 || latestRows.length > 0)
   if (!isSourced) {
     return { ...MOCK_SOCIAL_DATA, isSourced: false }
   }
 
-  const totalClicks = dailyClicks.reduce((sum, c) => sum + (c.total_clicks ?? 0), 0)
-  const humanClicks = dailyClicks.reduce((sum, c) => sum + (c.human_clicks ?? 0), 0)
+  // Headline totals = the authoritative per-range period total (matches
+  // Short.io's dashboard). Falls back to summing per-day rows only if the
+  // range row is somehow absent.
+  const totalClicks =
+    rangeRow?.total_clicks ?? dailyClicks.reduce((sum, c) => sum + (c.total_clicks ?? 0), 0)
+  const humanClicks =
+    rangeRow?.human_clicks ?? dailyClicks.reduce((sum, c) => sum + (c.human_clicks ?? 0), 0)
   const botClicks = Math.max(0, totalClicks - humanClicks)
 
   // Click trend: one point per day, from the range-bounded domain_daily rows.
@@ -517,15 +528,21 @@ export default async function SocialPage({
             </div>
           )}
         </div>
-        <AreaChart
-          data={data.clickTrend}
-          title={`Click Trend (${rangeLabel})`}
-          color="#01A6FA"
-          secondaryColor="#E5B897"
-          seriesLabel="Total Clicks"
-          secondarySeriesLabel="Human Clicks"
-          height={320}
-        />
+        <div>
+          <AreaChart
+            data={data.clickTrend}
+            title={`Click Trend (${rangeLabel})`}
+            color="#01A6FA"
+            secondaryColor="#E5B897"
+            seriesLabel="Total Clicks"
+            secondarySeriesLabel="Human Clicks"
+            height={320}
+          />
+          <p className="mt-2 text-xs text-mrhb-dark/40">
+            Daily clicks as recorded by Short.io. Short.io reports the headline total on a
+            different basis, so the daily points may not sum to the total above.
+          </p>
+        </div>
       </div>
 
       {/* Top performing links */}
