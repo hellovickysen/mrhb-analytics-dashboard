@@ -196,19 +196,24 @@ const MOCK_SOCIAL_DATA: SocialData = {
   isSourced: false,
 }
 
-// Referrer domain -> display platform + card styling. UI-only metadata that
-// has no equivalent database column, so it's kept as a static lookup keyed
-// by the referrer values actually written into `shortio_clicks.referrer`.
-const PLATFORM_STYLE_BY_REFERRER: Record<
+// Social platform -> display label + card styling. UI-only metadata keyed by
+// the social-network name Short.io reports in its "social referrers" breakdown
+// (stats.social[].social), written into `shortio_clicks.referrer` on by_social
+// rows. Keyed lower-case so Short.io's casing (e.g. "Youtube") still matches.
+// This is the same categorization Short.io shows as "Top social referrers"
+// (which aggregates all of a platform's referrer hosts), so the dashboard's
+// platform cards reconcile with Short.io — unlike the raw referrer-host list,
+// where a single host such as t.co under-counts a platform's real total.
+const PLATFORM_STYLE_BY_SOCIAL: Record<
   string,
   { platform: string; colorFrom: string; colorTo: string; textColor: string }
 > = {
-  't.co': { platform: 'Twitter', colorFrom: 'from-sky-400', colorTo: 'to-sky-600', textColor: 'text-sky-600' },
-  'ir.ilmili.telegraph': { platform: 'Telegram', colorFrom: 'from-blue-400', colorTo: 'to-blue-600', textColor: 'text-blue-600' },
-  'm.facebook.com': { platform: 'Facebook', colorFrom: 'from-indigo-400', colorTo: 'to-indigo-600', textColor: 'text-indigo-600' },
-  'lnkd.in': { platform: 'LinkedIn', colorFrom: 'from-blue-500', colorTo: 'to-blue-700', textColor: 'text-blue-700' },
-  'l.instagram.com': { platform: 'Instagram', colorFrom: 'from-pink-400', colorTo: 'to-purple-600', textColor: 'text-purple-600' },
-  'www.youtube.com': { platform: 'YouTube', colorFrom: 'from-red-400', colorTo: 'to-red-600', textColor: 'text-red-600' },
+  twitter: { platform: 'Twitter', colorFrom: 'from-sky-400', colorTo: 'to-sky-600', textColor: 'text-sky-600' },
+  telegram: { platform: 'Telegram', colorFrom: 'from-blue-400', colorTo: 'to-blue-600', textColor: 'text-blue-600' },
+  facebook: { platform: 'Facebook', colorFrom: 'from-indigo-400', colorTo: 'to-indigo-600', textColor: 'text-indigo-600' },
+  linkedin: { platform: 'LinkedIn', colorFrom: 'from-blue-500', colorTo: 'to-blue-700', textColor: 'text-blue-700' },
+  instagram: { platform: 'Instagram', colorFrom: 'from-pink-400', colorTo: 'to-purple-600', textColor: 'text-purple-600' },
+  youtube: { platform: 'YouTube', colorFrom: 'from-red-400', colorTo: 'to-red-600', textColor: 'text-red-600' },
 }
 
 function formatTrendDate(dateStr: string): string {
@@ -273,26 +278,35 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
   const latestSnapshot = snapshotRows.reduce((max, c) => (c.date > max ? c.date : max), '')
   const latestRows = snapshotRows.filter((c) => c.date === latestSnapshot)
 
-  // Platform performance: the Short.io domain-statistics endpoint reports
-  // per-referrer TOTAL clicks (bot+human) only — there is no per-referrer
-  // human-click figure — so these cards show TOTAL clicks by platform,
-  // sourced from the by_referrer breakdown rows.
-  const referrerRows = latestRows.filter((c) => c.link_id === 'by_referrer')
-  const clicksByReferrer = referrerRows.reduce<Record<string, number>>((acc, c) => {
+  // Platform performance: sourced from the by_social breakdown rows, which
+  // mirror Short.io's "Top social referrers" (platform-level totals that
+  // aggregate every referrer host for a platform). These are TOTAL clicks
+  // (bot+human) — Short.io provides no per-platform human split. Rendered
+  // dynamically from whatever platforms Short.io reports, styled via lookup.
+  const socialRows = latestRows.filter((c) => c.link_id === 'by_social')
+  const clicksBySocial = socialRows.reduce<Record<string, number>>((acc, c) => {
     if (!c.referrer) return acc
     acc[c.referrer] = (acc[c.referrer] ?? 0) + (c.total_clicks ?? 0)
     return acc
   }, {})
-  const platforms: PlatformRow[] = Object.entries(PLATFORM_STYLE_BY_REFERRER).map(
-    ([referrer, style]) => ({
-      platform: style.platform,
-      clicks: clicksByReferrer[referrer] ?? 0,
-      referrer,
-      colorFrom: style.colorFrom,
-      colorTo: style.colorTo,
-      textColor: style.textColor,
+  const platforms: PlatformRow[] = Object.entries(clicksBySocial)
+    .map(([name, clicks]) => {
+      const style = PLATFORM_STYLE_BY_SOCIAL[name.toLowerCase()] ?? {
+        platform: name,
+        colorFrom: 'from-slate-400',
+        colorTo: 'to-slate-600',
+        textColor: 'text-slate-600',
+      }
+      return {
+        platform: style.platform,
+        clicks,
+        referrer: name,
+        colorFrom: style.colorFrom,
+        colorTo: style.colorTo,
+        textColor: style.textColor,
+      }
     })
-  )
+    .sort((a, b) => b.clicks - a.clicks)
 
   // Geographic breakdown: per-country TOTAL clicks from the by_country rows.
   const countryRows = latestRows.filter((c) => c.link_id === 'by_country')
@@ -441,7 +455,7 @@ export default async function SocialPage({
                   {formatNumber(platform.clicks)}
                 </p>
                 <p className="mt-1 text-xs text-mrhb-dark/50">
-                  clicks &middot; referrer: {platform.referrer}
+                  clicks &middot; social referrer
                 </p>
               </div>
             )
