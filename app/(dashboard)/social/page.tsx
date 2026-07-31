@@ -224,22 +224,47 @@ function formatTrendDate(dateStr: string): string {
 
 async function getSocialData(searchParams?: { range?: string }): Promise<SocialData> {
   const supabase = createServiceClient()
-  const { startDate: since } = getDateWindow(searchParams)
+  const { startDate: since, endDate: until } = getDateWindow(searchParams)
 
-  const clicksRes = await supabase
-    .from('shortio_clicks')
-    .select('date, link_id, total_clicks, human_clicks, country, os, referrer')
-    .gte('date', since)
+  // Two independent reads, run in parallel:
+  //   1. domain_daily rows BOUNDED to the selected range [since, until] — the
+  //      authoritative per-day totals that drive the KPI cards and the trend.
+  //      Bounding on BOTH ends is what makes today / yesterday / 7d / 30d / 90d
+  //      correct; a gte-only filter would leak later days into "yesterday".
+  //   2. The dimensional breakdown snapshot (by_social / by_country / by_os) —
+  //      read as the LATEST snapshot independent of the selected range. These
+  //      are cumulative period snapshots written once per sync (never sum them
+  //      across dates), shown on the page as a fixed "last 30 days" reference
+  //      because Short.io only exposes period breakdowns.
+  const snapshotCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10)
 
-  const clicks = clicksRes.data ?? []
+  const [dailyRes, breakdownRes] = await Promise.all([
+    supabase
+      .from('shortio_clicks')
+      .select('date, total_clicks, human_clicks')
+      .eq('link_id', 'domain_daily')
+      .gte('date', since)
+      .lte('date', until),
+    supabase
+      .from('shortio_clicks')
+      .select('date, link_id, total_clicks, country, os, referrer')
+      .in('link_id', ['by_social', 'by_country', 'by_os'])
+      .gte('date', snapshotCutoff),
+  ])
 
-  // Headline totals + trend come ONLY from the daily domain time-series rows
-  // (link_id='domain_daily'). If none exist, the Short.io sync hasn't produced
-  // usable daily facts, so we fall back to clearly-labelled sample data rather
-  // than presenting mock numbers as live analytics.
-  const dailyClicks = clicks.filter((c) => c.link_id === 'domain_daily')
-  const isSourced = !clicksRes.error && dailyClicks.length > 0
+  const dailyClicks = dailyRes.data ?? []
+  const snapshotRows = breakdownRes.data ?? []
 
+  // Keep only the most recent breakdown snapshot.
+  const latestSnapshot = snapshotRows.reduce((max, c) => (c.date > max ? c.date : max), '')
+  const latestRows = snapshotRows.filter((c) => c.date === latestSnapshot)
+
+  // "Sourced" means Short.io has synced at all. When true but the selected
+  // range simply has no clicks, we show real zeros (with a friendly note) —
+  // never the mock sample data.
+  const isSourced = !dailyRes.error && (dailyClicks.length > 0 || latestRows.length > 0)
   if (!isSourced) {
     return { ...MOCK_SOCIAL_DATA, isSourced: false }
   }
@@ -248,7 +273,7 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
   const humanClicks = dailyClicks.reduce((sum, c) => sum + (c.human_clicks ?? 0), 0)
   const botClicks = Math.max(0, totalClicks - humanClicks)
 
-  // Click trend: one point per day, from the domain_daily rows only.
+  // Click trend: one point per day, from the range-bounded domain_daily rows.
   const clicksByDate = dailyClicks.reduce<Record<string, { total: number; human: number }>>(
     (acc, c) => {
       const bucket = acc[c.date] ?? { total: 0, human: 0 }
@@ -266,17 +291,6 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
       value: clicksByDate[date].total,
       secondaryValue: clicksByDate[date].human,
     }))
-
-  // The dimensional breakdown rows (by_referrer / by_country / by_os / etc.)
-  // are CUMULATIVE period snapshots written once per ingestion run, dated with
-  // the run day. Summing them across the date window would multiply every
-  // figure by the number of daily cron snapshots in range. So read ONLY the
-  // most recent snapshot for the platform / country / device breakdowns.
-  // (These reflect the latest full ingestion window and are not re-scaled per
-  // dashboard range — Short.io exposes period breakdowns only.)
-  const snapshotRows = clicks.filter((c) => c.link_id !== 'domain_daily')
-  const latestSnapshot = snapshotRows.reduce((max, c) => (c.date > max ? c.date : max), '')
-  const latestRows = snapshotRows.filter((c) => c.date === latestSnapshot)
 
   // Platform performance: sourced from the by_social breakdown rows, which
   // mirror Short.io's "Top social referrers" (platform-level totals that
@@ -342,7 +356,8 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
     humanClicks,
     botClicks,
     platforms,
-    clickTrend: clickTrend.length > 0 ? clickTrend : MOCK_SOCIAL_DATA.clickTrend,
+    // Real range-bounded trend — no mock fallback when a range has no clicks.
+    clickTrend,
     topLinks,
     topCountries,
     deviceSplit,
@@ -366,6 +381,15 @@ export default async function SocialPage({
   searchParams: { range?: string }
 }) {
   const data = await getSocialData(searchParams)
+
+  const RANGE_LABELS: Record<string, string> = {
+    today: 'Today',
+    yesterday: 'Yesterday',
+    '7d': 'Last 7 Days',
+    '30d': 'Last 30 Days',
+    '90d': 'Last 90 Days',
+  }
+  const rangeLabel = RANGE_LABELS[searchParams?.range ?? '30d'] ?? 'Last 30 Days'
 
   const humanClickRate = data.totalClicks > 0 ? (data.humanClicks / data.totalClicks) * 100 : 0
   const totalPlatformClicks = data.platforms.reduce((sum, p) => sum + p.clicks, 0) || 1
@@ -404,6 +428,19 @@ export default async function SocialPage({
         </div>
       )}
 
+      {/* Sourced but no clicks in the selected window (e.g. earlier today) */}
+      {data.isSourced && data.totalClicks === 0 && (
+        <div className="mb-6 rounded-lg border border-mrhb-blue-light bg-mrhb-blue-light/30 p-4">
+          <p className="text-sm font-medium text-mrhb-dark">
+            No clicks recorded in this period yet.
+          </p>
+          <p className="mt-1 text-xs text-mrhb-dark/60">
+            The click totals and trend below are for the selected date range. The platform,
+            country, and device breakdowns reflect the last 30 days.
+          </p>
+        </div>
+      )}
+
       {/* KPI cards row — pass iconName strings, not components */}
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <KPICard
@@ -434,7 +471,10 @@ export default async function SocialPage({
 
       {/* Platform performance — 2x3 grid */}
       <div className="mb-6">
-        <h3 className="mb-4 text-base font-semibold text-mrhb-dark">Platform Performance</h3>
+        <h3 className="mb-4 text-base font-semibold text-mrhb-dark">
+          Platform Performance{' '}
+          <span className="text-xs font-normal text-mrhb-dark/40">&middot; last 30 days</span>
+        </h3>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {data.platforms.map((platform) => {
             const sharePct = (platform.clicks / totalPlatformClicks) * 100
@@ -467,17 +507,19 @@ export default async function SocialPage({
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
         <div>
           <DonutChart data={humanVsBotData} title="Human vs. Bot Traffic" height={280} />
-          <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
-            <p className="text-xs font-medium text-amber-700">
-              {formatPercent(100 - humanClickRate)} of clicks on mrhbnetwork.short.gy are
-              flagged as bot traffic &mdash; treat raw click totals with caution and prioritize
-              human-click metrics when judging campaign performance.
-            </p>
-          </div>
+          {data.totalClicks > 0 && (
+            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <p className="text-xs font-medium text-amber-700">
+                {formatPercent(100 - humanClickRate)} of clicks on mrhbnetwork.short.gy are
+                flagged as bot traffic &mdash; treat raw click totals with caution and prioritize
+                human-click metrics when judging campaign performance.
+              </p>
+            </div>
+          )}
         </div>
         <AreaChart
           data={data.clickTrend}
-          title="Click Trend (Last 30 Days)"
+          title={`Click Trend (${rangeLabel})`}
           color="#01A6FA"
           secondaryColor="#E5B897"
           seriesLabel="Total Clicks"
@@ -498,7 +540,10 @@ export default async function SocialPage({
 
       {/* Geographic breakdown */}
       <div>
-        <h3 className="mb-4 text-base font-semibold text-mrhb-dark">Geographic Breakdown</h3>
+        <h3 className="mb-4 text-base font-semibold text-mrhb-dark">
+          Geographic Breakdown{' '}
+          <span className="text-xs font-normal text-mrhb-dark/40">&middot; last 30 days</span>
+        </h3>
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <BarChart
             data={data.topCountries}

@@ -16,6 +16,16 @@
 const API_BASE = 'https://api.short.io'
 const STATS_BASE = 'https://statistics.short.io'
 
+// Days of authoritative per-day totals to ingest — drives the 90-day range and
+// makes today/yesterday/7d/30d all exact. Fetched via chunked single-day calls.
+const DAILY_DAYS = 90
+// Fixed reference window for the dimensional breakdown snapshot
+// (platform/country/device). Shown on the Social page labelled "last 30 days".
+const BREAKDOWN_DAYS = 30
+// Max concurrent per-day statistics requests (keeps well within the 120s
+// function budget without hammering Short.io).
+const DAILY_CONCURRENCY = 10
+
 function getApiKey(): string | null {
   const key = process.env.SHORTIO_API_KEY
   if (!key) {
@@ -161,41 +171,42 @@ export async function fetchAllShortIOData(
     const domainId = await getDomainId(apiKey, domain)
     if (!domainId) return { links: [], clicks: [] }
 
-    // Fetch links and domain stats in parallel
+    // Date anchors (UTC — consistent with the dashboard's date-window logic).
+    const now = new Date()
+    const DAY_MS = 24 * 60 * 60 * 1000
+    const iso = (d: Date): string => d.toISOString().slice(0, 10)
+    const today = iso(now)
+    const tomorrow = iso(new Date(now.getTime() + DAY_MS))
+    const breakdownStart = iso(new Date(now.getTime() - BREAKDOWN_DAYS * DAY_MS))
+
+    // Fetch the link registry plus one period-statistics call over the fixed
+    // last-30-days reference window (inclusive of today, since endDate is
+    // exclusive). This provides the authoritative period total (domain_total,
+    // read by the funnel's Social Discovery stage) and the dimensional
+    // breakdowns (country/referrer/social/os/browser) that the Social page
+    // shows as a labelled "last 30 days" reference.
     const [links, stats] = await Promise.all([
       fetchShortIOLinks(),
-      (async () => {
-        const params = new URLSearchParams({
-          period: 'custom',
-          startDate,
-          endDate,
-          clicksChartInterval: 'day',
-          tz: 'UTC',
-        })
-        return shortioFetch(
-          `${STATS_BASE}/statistics/domain/${domainId}?${params}`,
-          apiKey
-        )
-      })(),
+      shortioFetch(
+        `${STATS_BASE}/statistics/domain/${domainId}?` +
+          new URLSearchParams({
+            period: 'custom',
+            startDate: breakdownStart,
+            endDate: tomorrow,
+            tz: 'UTC',
+          }).toString(),
+        apiKey
+      ),
     ])
 
     const clickRows: Record<string, any>[] = []
-    const today = new Date().toISOString().slice(0, 10)
 
-    // Calculate human click ratio for estimating daily human clicks.
-    // The Short.io API only gives human clicks as a period total, not
-    // per-day. We distribute proportionally across daily rows so the
-    // date range picker works correctly.
-    const totalClicks = stats.clicks || 1
-    const totalHuman = stats.humanClicks || 0
-    const humanRatio = totalHuman / totalClicks
-
-    // Overwrite any old domain_total row with human_clicks=0 so it doesn't
-    // inflate date-range queries. Human clicks are now in daily rows instead.
+    // Domain period total (last 30 days). human_clicks kept 0 here — per-day
+    // human clicks live in the domain_daily rows below.
     clickRows.push({
       date: today,
       link_id: 'domain_total',
-      total_clicks: stats.clicks || 0,
+      total_clicks: Number(stats.clicks) || 0,
       human_clicks: 0,
       country: 'ALL',
       city: 'ALL',
@@ -291,78 +302,63 @@ export async function fetchAllShortIOData(
       }
     }
 
-    // Daily time-series rows — PRIMARY data source for date-range queries.
-    // Short.io returns clickStatistics.datasets[0].data as an array of
-    // { x: ISO-date, y: <clicks> } points. Two source facts drive this logic:
-    //
-    //   1. `y` is a NUMERIC STRING (e.g. "6"), not a number. Coerce with
-    //      Number() — a strict `typeof y === 'number'` check silently drops
-    //      every point, leaving zero domain_daily rows (the Social page then
-    //      falls back to mock data).
-    //
-    //   2. This daily chart is a SHAPE series only: its values do NOT sum to
-    //      the authoritative period totals. Empirically, for a window whose
-    //      stats.clicks=1202 / stats.humanClicks=261, the daily series summed
-    //      to just 139. Using the raw daily value as the day's total clicks
-    //      therefore understates totals AND makes distributed human clicks
-    //      exceed them (a >100% human rate).
-    //
-    // So we treat the daily points purely as WEIGHTS and allocate the real
-    // period totals (stats.clicks and stats.humanClicks) across the days,
-    // with a final-day remainder correction so the domain_daily rows sum
-    // EXACTLY to stats.clicks (total) and stats.humanClicks (human). Because
-    // both series use the same weights and totalClicks >= totalHuman, every
-    // day keeps total_clicks >= human_clicks (no per-day rate above 100%).
-    const rawDailyPoints = stats.clickStatistics?.datasets?.[0]?.data
-    if (Array.isArray(rawDailyPoints)) {
-      const dailyPoints = rawDailyPoints
-        .map((p: any) => ({ x: p?.x, y: Number(p?.y) }))
-        .filter((p: { x: any; y: number }) => p.x && Number.isFinite(p.y))
+    // Authoritative per-day totals (domain_daily) over the last DAILY_DAYS.
+    // Short.io's single daily-chart series is unreliable for per-day TOTAL
+    // clicks — it approximates human/day, does not sum to the period total,
+    // and its magnitude shifts with the query window. So instead we query each
+    // day individually with a [day, day+1) window (endDate is exclusive) and
+    // read that day's authoritative clicks / humanClicks. This makes every
+    // dashboard range (today / yesterday / 7d / 30d / 90d) exact for both the
+    // KPI cards and the trend. Requests are chunked to stay within the 120s
+    // function budget; a failed day is skipped (not written as 0) so a
+    // transient error never overwrites a previously-good row.
+    const days: string[] = []
+    for (let i = DAILY_DAYS - 1; i >= 0; i--) {
+      days.push(iso(new Date(now.getTime() - i * DAY_MS)))
+    }
 
-      const weightSum = dailyPoints.reduce((s: number, p: { y: number }) => s + p.y, 0)
-      const n = dailyPoints.length
-      const denom = weightSum > 0 ? weightSum : n || 1
-
-      // Cumulative-rounding allocation: walk the days accumulating weight and
-      // set each day's total to round(cumFraction * periodTotal) minus what's
-      // already been allocated. The final day's cumulative fraction is 1, so
-      // the rounded cumulative equals the exact period total — the daily rows
-      // sum EXACTLY to stats.clicks / stats.humanClicks with no drift, and a
-      // trailing zero-click day (e.g. "today") correctly receives 0.
-      let cumWeight = 0
-      let allocTotal = 0
-      let allocHuman = 0
-
-      for (let i = 0; i < n; i++) {
-        const point = dailyPoints[i]
-        const dateStr = String(point.x).slice(0, 10)
-        cumWeight += weightSum > 0 ? point.y : 1
-        const frac = cumWeight / denom
-
-        const targetTotal = Math.round(frac * totalClicks)
-        const targetHuman = Math.round(frac * totalHuman)
-        const dailyTotal = targetTotal - allocTotal
-        const dailyHuman = targetHuman - allocHuman
-        allocTotal = targetTotal
-        allocHuman = targetHuman
-
-        if (dateStr) {
-          clickRows.push({
-            date: dateStr,
-            link_id: 'domain_daily',
-            total_clicks: Math.max(0, dailyTotal),
-            human_clicks: Math.max(0, dailyHuman),
-            country: 'ALL',
-            city: 'ALL',
-            os: 'ALL',
-            browser: 'ALL',
-            referrer: 'ALL',
+    for (let i = 0; i < days.length; i += DAILY_CONCURRENCY) {
+      const batch = days.slice(i, i + DAILY_CONCURRENCY)
+      const settled = await Promise.all(
+        batch.map(async (day) => {
+          const nextStr = iso(new Date(new Date(`${day}T00:00:00.000Z`).getTime() + DAY_MS))
+          const params = new URLSearchParams({
+            period: 'custom',
+            startDate: day,
+            endDate: nextStr,
+            tz: 'UTC',
           })
-        }
+          try {
+            const s = await shortioFetch(
+              `${STATS_BASE}/statistics/domain/${domainId}?${params.toString()}`,
+              apiKey
+            )
+            return { day, total: Number(s.clicks) || 0, human: Number(s.humanClicks) || 0, ok: true }
+          } catch (err) {
+            console.error(`[shortio] per-day fetch failed for ${day}:`, err)
+            return { day, total: 0, human: 0, ok: false }
+          }
+        })
+      )
+
+      for (const r of settled) {
+        if (!r.ok) continue
+        clickRows.push({
+          date: r.day,
+          link_id: 'domain_daily',
+          total_clicks: r.total,
+          // Guard: human can never exceed total for a day.
+          human_clicks: Math.min(Math.max(0, r.human), r.total),
+          country: 'ALL',
+          city: 'ALL',
+          os: 'ALL',
+          browser: 'ALL',
+          referrer: 'ALL',
+        })
       }
     }
 
-    console.log(`[shortio] Fetched ${links.length} links, ${stats.clicks || 0} total clicks, ${stats.humanClicks || 0} human clicks, ${clickRows.length} click rows`)
+    console.log(`[shortio] Fetched ${links.length} links; 30d period total ${Number(stats.clicks) || 0} / human ${Number(stats.humanClicks) || 0}; ${days.length}-day per-day series; ${clickRows.length} click rows total`)
 
     return { links, clicks: clickRows }
   } catch (error) {
