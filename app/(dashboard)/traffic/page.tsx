@@ -187,35 +187,36 @@ interface DailyKpiRow {
 /** The five metric suffixes stored per range in daily_kpis. */
 const KPI_METRICS = ['sessions', 'users', 'new_users', 'bounce_rate', 'avg_session_duration'] as const
 
+/** Delimiter used to encode channel/source names into daily_kpis metric_name. */
+const SEP = '~~'
+
 async function getTrafficData(searchParams?: { range?: string }): Promise<TrafficData> {
   try {
     const supabase = createServiceClient()
     const rangeKey = searchParams?.range ?? '30d'
     const { startDate, endDate } = getDateWindow(searchParams)
 
-    // Authoritative KPI snapshot is written each sync (dated the run day);
-    // read the most recent one within a small cutoff.
-    const snapshotCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
-    const kpiMetricNames = KPI_METRICS.map((m) => `traffic_${m}_${rangeKey}`)
+    // Everything except the geo breakdowns now comes from AUTHORITATIVE GA4
+    // data stored in daily_kpis (website property, de-duplicated) — this
+    // bypasses the polluted ga_traffic table. Device/country/browser stay on
+    // ga_geo, which is already website-only.
+    const snapshotCutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
 
-    const [kpiResult, trafficResult, geoResult] = await Promise.all([
+    const [snapResult, trendResult, geoResult] = await Promise.all([
+      // Totals + channel + source breakdown rows (dated the sync day).
       supabase
         .from('daily_kpis')
         .select('date, metric_name, metric_value, period_comparison_pct')
         .eq('source', 'ga4')
-        .in('metric_name', kpiMetricNames)
         .gte('date', snapshotCutoff),
+      // Per-date trend, bounded to the selected window.
       supabase
-        .from('ga_traffic')
-        .select('date, sessions, users, new_users, bounce_rate, avg_session_duration, channel, source, medium')
+        .from('daily_kpis')
+        .select('date, metric_name, metric_value, period_comparison_pct')
+        .eq('source', 'ga4')
+        .in('metric_name', ['traffic_trend_sessions', 'traffic_trend_users'])
         .gte('date', startDate)
-        .lte('date', endDate)
-        // Website-only, to match the website-property KPI cards and GA4's own
-        // website report. Ingestion tags website rows with campaign=null and
-        // Sahal Wallet app rows with campaign='(not set)', so this cleanly
-        // excludes app traffic (which belongs to the App Performance page).
-        .is('campaign', null)
-        .order('date', { ascending: true }),
+        .lte('date', endDate),
       supabase
         .from('ga_geo')
         .select('date, country, users, sessions, device_category, browser, os')
@@ -223,64 +224,70 @@ async function getTrafficData(searchParams?: { range?: string }): Promise<Traffi
         .lte('date', endDate),
     ])
 
-    // --- Authoritative KPIs from daily_kpis (latest snapshot) ---
-    const kpiRows = (!kpiResult.error && kpiResult.data ? (kpiResult.data as DailyKpiRow[]) : [])
-    const latestKpiDate = kpiRows.reduce((max, r) => (r.date > max ? r.date : max), '')
-    const latestKpiRows = kpiRows.filter((r) => r.date === latestKpiDate)
-    const kpiByMetric = new Map(latestKpiRows.map((r) => [r.metric_name, r]))
-    const kpisSourced = latestKpiRows.length > 0
+    const snapAll = !snapResult.error && snapResult.data ? (snapResult.data as DailyKpiRow[]) : []
+    // Latest snapshot day for the totals/channel/source rows.
+    const snapshotRows = snapAll.filter((r) => !r.metric_name.startsWith('traffic_trend_'))
+    const latestSnapshot = snapshotRows.reduce((max, r) => (r.date > max ? r.date : max), '')
+    const latestRows = snapshotRows.filter((r) => r.date === latestSnapshot)
+    const kpiByMetric = new Map(latestRows.map((r) => [r.metric_name, r]))
 
     const readKpi = (metric: string): { value: number; change: number } => {
       const row = kpiByMetric.get(`traffic_${metric}_${rangeKey}`)
       return { value: row?.metric_value ?? 0, change: row?.period_comparison_pct ?? 0 }
     }
+    const kpisSourced = KPI_METRICS.some((m) => kpiByMetric.has(`traffic_${m}_${rangeKey}`))
 
-    const trafficRows = (!trafficResult.error && trafficResult.data
-      ? (trafficResult.data as GATrafficWindowRow[])
-      : []
-    ).filter((r) => r.date)
     const geoRows = !geoResult.error && geoResult.data ? (geoResult.data as GAGeoWindowRow[]) : []
-    const breakdownSourced = trafficRows.length > 0
 
-    // Nothing available at all — fall back to the full sample payload.
-    if (!kpisSourced && !breakdownSourced) {
+    // --- Channel breakdown (authoritative) ---
+    const chanPrefix = `traffic_chan_${rangeKey}${SEP}`
+    const channelBreakdown: DonutChartDataPoint[] = latestRows
+      .filter((r) => r.metric_name.startsWith(chanPrefix))
+      .map((r) => ({ name: r.metric_name.slice(chanPrefix.length), value: r.metric_value }))
+      .sort((a, b) => b.value - a.value)
+
+    // --- Top sources (authoritative) ---
+    const srcPrefix = `traffic_src_${rangeKey}${SEP}`
+    const srcAgg = new Map<string, SourceRow>()
+    for (const r of latestRows) {
+      if (!r.metric_name.startsWith(srcPrefix)) continue
+      const parts = r.metric_name.slice(srcPrefix.length).split(SEP) // [src, med, metric]
+      if (parts.length < 3) continue
+      const metric = parts[parts.length - 1]
+      const medium = parts[parts.length - 2]
+      const source = parts.slice(0, parts.length - 2).join(SEP)
+      const key = `${source}${SEP}${medium}`
+      const entry = srcAgg.get(key) ?? { source, medium, sessions: 0, users: 0, bounceRate: 0 }
+      if (metric === 'sessions') entry.sessions = r.metric_value
+      else if (metric === 'users') entry.users = r.metric_value
+      else if (metric === 'bounce') entry.bounceRate = r.metric_value
+      srcAgg.set(key, entry)
+    }
+    const topSources: SourceRow[] = Array.from(srcAgg.values())
+      .sort((a, b) => b.sessions - a.sessions)
+      .slice(0, 10)
+
+    const breakdownSourced = channelBreakdown.length > 0 || topSources.length > 0
+
+    // Nothing available at all — full sample fallback.
+    if (!kpisSourced && !breakdownSourced && geoRows.length === 0) {
       return { ...MOCK_TRAFFIC, kpisSourced: false, breakdownSourced: false }
     }
 
-    // KPI cards: authoritative daily_kpis when present; otherwise (rare) derive
-    // from the window rows. NOTE: summing users is only a degraded fallback —
-    // the authoritative path is the correct, de-duplicated one.
-    let sessions: { value: number; change: number }
-    let users: { value: number; change: number }
-    let newUsers: { value: number; change: number }
-    let bounceRate: { value: number; change: number }
-    let avgSessionDuration: { value: number; change: number }
+    const sessions = readKpi('sessions')
+    const users = readKpi('users')
+    const newUsers = readKpi('new_users')
+    const bounceRate = readKpi('bounce_rate')
+    const avgSessionDuration = readKpi('avg_session_duration')
 
-    if (kpisSourced) {
-      sessions = readKpi('sessions')
-      users = readKpi('users')
-      newUsers = readKpi('new_users')
-      bounceRate = readKpi('bounce_rate')
-      avgSessionDuration = readKpi('avg_session_duration')
-    } else {
-      const sum = (key: 'sessions' | 'users' | 'new_users') =>
-        trafficRows.reduce((total, row) => total + (row[key] ?? 0), 0)
-      const avg = (key: 'bounce_rate' | 'avg_session_duration') =>
-        trafficRows.length > 0 ? trafficRows.reduce((t, r) => t + (r[key] ?? 0), 0) / trafficRows.length : 0
-      sessions = { value: sum('sessions'), change: 0 }
-      users = { value: sum('users'), change: 0 }
-      newUsers = { value: sum('new_users'), change: 0 }
-      bounceRate = { value: avg('bounce_rate'), change: 0 }
-      avgSessionDuration = { value: avg('avg_session_duration'), change: 0 }
-    }
-
-    // --- Trend / channel / sources from the bounded ga_traffic window rows ---
+    // --- Trend (authoritative per-date, bounded) ---
+    const trendRows = !trendResult.error && trendResult.data ? (trendResult.data as DailyKpiRow[]) : []
     const trendByDate = new Map<string, { sessions: number; users: number }>()
-    for (const row of trafficRows) {
-      const entry = trendByDate.get(row.date) ?? { sessions: 0, users: 0 }
-      entry.sessions += row.sessions ?? 0
-      entry.users += row.users ?? 0
-      trendByDate.set(row.date, entry)
+    for (const r of trendRows) {
+      const entry = trendByDate.get(r.date) ?? { sessions: 0, users: 0 }
+      if (r.metric_name === 'traffic_trend_sessions') entry.sessions = r.metric_value
+      else if (r.metric_name === 'traffic_trend_users') entry.users = r.metric_value
+      trendByDate.set(r.date, entry)
     }
     const sessionsUsersTrend: AreaChartDataPoint[] = Array.from(trendByDate.entries())
       .sort(([a], [b]) => a.localeCompare(b))
@@ -290,39 +297,7 @@ async function getTrafficData(searchParams?: { range?: string }): Promise<Traffi
         secondaryValue: u,
       }))
 
-    const channelTotals = new Map<string, number>()
-    for (const row of trafficRows) {
-      channelTotals.set(row.channel, (channelTotals.get(row.channel) ?? 0) + (row.sessions ?? 0))
-    }
-    const channelBreakdown: DonutChartDataPoint[] = Array.from(channelTotals.entries())
-      .sort(([, a], [, b]) => b - a)
-      .map(([name, value]) => ({ name, value }))
-
-    const sourceAgg = new Map<string, { sessions: number; users: number; bounceSum: number; count: number }>()
-    for (const row of trafficRows) {
-      const key = `${row.source}\u0000${row.medium}`
-      const entry = sourceAgg.get(key) ?? { sessions: 0, users: 0, bounceSum: 0, count: 0 }
-      entry.sessions += row.sessions ?? 0
-      entry.users += row.users ?? 0
-      entry.bounceSum += row.bounce_rate ?? 0
-      entry.count += 1
-      sourceAgg.set(key, entry)
-    }
-    const topSources: SourceRow[] = Array.from(sourceAgg.entries())
-      .map(([key, agg]) => {
-        const [source, medium] = key.split('\u0000')
-        return {
-          source,
-          medium,
-          sessions: agg.sessions,
-          users: agg.users,
-          bounceRate: agg.count > 0 ? agg.bounceSum / agg.count : 0,
-        }
-      })
-      .sort((a, b) => b.sessions - a.sessions)
-      .slice(0, 10)
-
-    // --- Device / country / browser+OS from ga_geo window rows ---
+    // --- Device / country / browser+OS from ga_geo (website-only) ---
     let deviceBreakdown: DonutChartDataPoint[] = []
     let topCountries: BarChartDataPoint[] = []
     let browserOsBreakdown: BrowserOsRow[] = []
@@ -338,7 +313,7 @@ async function getTrafficData(searchParams?: { range?: string }): Promise<Traffi
 
         const browser = row.browser ?? 'Unknown'
         const os = row.os ?? 'Unknown'
-        const key = `${browser}\u0000${os}`
+        const key = `${browser}${SEP}${os}`
         const entry = browserOsAgg.get(key) ?? { sessions: 0, users: 0 }
         entry.sessions += row.sessions ?? 0
         entry.users += row.users ?? 0
@@ -356,14 +331,12 @@ async function getTrafficData(searchParams?: { range?: string }): Promise<Traffi
 
       browserOsBreakdown = Array.from(browserOsAgg.entries())
         .map(([key, agg]) => {
-          const [browser, os] = key.split('\u0000')
+          const [browser, os] = key.split(SEP)
           return {
             browser,
             os,
             sessions: agg.sessions,
             users: agg.users,
-            // avg_session_duration isn't tracked per geo/device slice, so the
-            // window-level average is used as a reasonable per-row estimate.
             avgSessionDuration: avgSessionDuration.value,
           }
         })

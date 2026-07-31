@@ -1,25 +1,29 @@
 /**
- * Authoritative per-range GA4 traffic totals for the MRHB Analytics Dashboard.
+ * Authoritative per-range GA4 traffic totals AND breakdowns for the MRHB
+ * Analytics Dashboard, written to the `daily_kpis` table.
  *
  * WHY THIS EXISTS
- * The Traffic page used to derive its KPI cards by SUMMING the `ga_traffic`
- * rows, which are broken down by (date × channel × source × medium). GA4's
- * user metrics (`totalUsers`, `newUsers`) are DE-DUPLICATED and NOT additive:
- * summing them across dimension/day rows double-counts the same person many
- * times, which produced the impossible "Users > Sessions" on the dashboard.
+ * 1. GA4 user metrics (activeUsers/newUsers) are DE-DUPLICATED and NOT additive,
+ *    so summing `ga_traffic` rows over-counted users (Users > Sessions). We ask
+ *    GA4 for each period's total with no breakdown dimensions so GA4 de-dupes.
+ * 2. `ga_traffic` is polluted: historical Sahal Wallet app rows tagged
+ *    campaign=null sit permanently in the table (the upsert conflict key
+ *    includes campaign, so today's correctly-tagged '(not set)' app rows don't
+ *    overwrite the old null ones). That inflated the trend/channel/source
+ *    breakdowns ~10x. So we fetch those breakdowns straight from GA4's website
+ *    property here and store them authoritatively, bypassing the polluted table.
  *
- * The only correct way to get a period's user count is to ask GA4 for the
- * total over that exact window with NO breakdown dimensions, so GA4 does the
- * de-duplication. This module does that for each standard dashboard range
- * (today / yesterday / 7d / 30d / 90d), for both the website property
- * (GA4_PROPERTY_ID) and the Sahal Wallet app property (GA4_APP_PROPERTY_ID) —
- * matching the web+app scope the Traffic page's breakdowns already combine —
- * and also fetches the matching PREVIOUS period so the % change is correct
- * even for windows the dashboard's own ga_traffic history doesn't cover yet
- * (GA4 retains far more history than our nightly sync has backfilled).
+ * All rows target `daily_kpis` (unique key: date, source, metric_name). We use
+ * source='ga4' and structured metric_names:
+ *   - traffic_<metric>_<range>            — headline totals (metric_value +
+ *                                            period_comparison_pct), one per range.
+ *   - traffic_trend_sessions|users        — per-DATE daily trend (date = the day).
+ *   - traffic_chan_<range>~~<channel>     — sessions per channel, per range.
+ *   - traffic_src_<range>~~<src>~~<med>~~<sessions|users|bounce> — top sources.
+ * The page parses these in JS (no SQL LIKE), so '_' in names is harmless.
  *
- * Output rows are shaped for the `daily_kpis` table
- * (unique key: date, source, metric_name), read by app/(dashboard)/traffic.
+ * Website property only (GA4_PROPERTY_ID). App traffic belongs to App
+ * Performance; ga_geo (device/country/browser) is already website-only.
  *
  * Server-only module — never import from a 'use client' component.
  */
@@ -36,14 +40,6 @@ interface Totals {
   avg_session_duration: number
 }
 
-const ZERO: Totals = {
-  sessions: 0,
-  users: 0,
-  new_users: 0,
-  bounce_rate: 0,
-  avg_session_duration: 0,
-}
-
 /** daily_kpis row shape (source is the analytics_source enum — 'ga4' here). */
 export interface DailyKpiRow {
   date: string
@@ -53,10 +49,19 @@ export interface DailyKpiRow {
   period_comparison_pct: number | null
 }
 
+/** Delimiter for encoding channel/source names into metric_name (parsed in JS). */
+const SEP = '~~'
+
 function toNum(value: string | undefined | null): number {
   if (value === undefined || value === null || value === '') return 0
   const n = Number(value)
   return Number.isFinite(n) ? n : 0
+}
+
+/** GA4 reports dates as `YYYYMMDD`; daily_kpis.date is `YYYY-MM-DD`. */
+function formatGA4Date(raw: string | undefined | null): string {
+  if (!raw || !/^\d{8}$/.test(raw)) return raw ?? ''
+  return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`
 }
 
 function getClient(): analyticsdata_v1beta.Analyticsdata | null {
@@ -65,7 +70,7 @@ function getClient(): analyticsdata_v1beta.Analyticsdata | null {
   return google.analyticsdata({ version: 'v1beta', auth })
 }
 
-/** Fetches de-duplicated totals for a single [startDate, endDate] window (GA4 inclusive). */
+/** De-duplicated totals for a single [startDate, endDate] window (GA4 inclusive). */
 async function periodTotals(
   client: analyticsdata_v1beta.Analyticsdata,
   property: string,
@@ -78,71 +83,48 @@ async function periodTotals(
       dateRanges: [{ startDate, endDate }],
       metrics: [
         { name: 'sessions' },
-        { name: 'totalUsers' },
+        { name: 'activeUsers' },
         { name: 'newUsers' },
         { name: 'bounceRate' },
         { name: 'averageSessionDuration' },
       ],
     },
   })
-
   const row = resp.data.rows?.[0]
   const mv = (i: number): number => toNum(row?.metricValues?.[i]?.value)
-
   return {
     sessions: mv(0),
     users: mv(1),
     new_users: mv(2),
-    // GA4 returns bounceRate as a fraction (0-1); store as a percentage.
-    bounce_rate: mv(3) * 100,
+    bounce_rate: mv(3) * 100, // GA4 returns a 0-1 fraction
     avg_session_duration: mv(4),
   }
 }
 
-/** Combines website + app totals: additive metrics sum; rates are session-weighted. */
-function combine(a: Totals, b: Totals): Totals {
-  const sessions = a.sessions + b.sessions
-  const weighted = (av: number, bv: number) =>
-    sessions > 0 ? (av * a.sessions + bv * b.sessions) / sessions : 0
-  return {
-    sessions,
-    users: a.users + b.users,
-    new_users: a.new_users + b.new_users,
-    bounce_rate: weighted(a.bounce_rate, b.bounce_rate),
-    avg_session_duration: weighted(a.avg_session_duration, b.avg_session_duration),
-  }
-}
-
 function pctChange(current: number, previous: number): number | null {
-  // No comparable baseline — leave null rather than a misleading 100%.
   if (previous <= 0) return null
   const pct = ((current - previous) / previous) * 100
-  // When the prior window predates the property's data history the baseline is
-  // near-zero, producing absurd five-figure swings (e.g. 82950%). Treat
-  // anything beyond ±500% as "no comparable baseline" too.
+  // A baseline that predates the property's data yields absurd swings; treat
+  // anything beyond ±500% as "no comparable baseline".
   if (Math.abs(pct) > 500) return null
   return pct
 }
 
 /**
- * Builds authoritative per-range GA4 traffic KPI rows for the `daily_kpis`
- * table. Windows are UTC and inclusive on both ends (GA4 semantics), mirroring
- * the dashboard's date ranges. Each range needs a current + previous window,
- * fetched for the website property and (when configured) the app property.
+ * Builds authoritative per-range GA4 traffic KPI + breakdown rows for the
+ * `daily_kpis` table. All windows are UTC and inclusive on both ends (GA4
+ * semantics), mirroring the dashboard's date ranges.
  */
 export async function fetchGA4TrafficRangeKpis(): Promise<DailyKpiRow[]> {
   try {
     const client = getClient()
-    const webProperty = process.env.GA4_PROPERTY_ID
+    const property = process.env.GA4_PROPERTY_ID
       ? `properties/${process.env.GA4_PROPERTY_ID}`
       : null
-    if (!client || !webProperty) {
+    if (!client || !property) {
       console.warn('[ga4-range-kpis] Missing GA4 client or GA4_PROPERTY_ID — skipped.')
       return []
     }
-    const appProperty = process.env.GA4_APP_PROPERTY_ID
-      ? `properties/${process.env.GA4_APP_PROPERTY_ID}`
-      : null
 
     const DAY_MS = 24 * 60 * 60 * 1000
     const now = new Date()
@@ -150,7 +132,6 @@ export async function fetchGA4TrafficRangeKpis(): Promise<DailyKpiRow[]> {
     const ago = (n: number): string => iso(new Date(now.getTime() - n * DAY_MS))
     const today = iso(now)
 
-    // range -> current [start,end] and previous [start,end], inclusive.
     const ranges: Record<string, { cur: [string, string]; prev: [string, string] }> = {
       today: { cur: [today, today], prev: [ago(1), ago(1)] },
       yesterday: { cur: [ago(1), ago(1)], prev: [ago(2), ago(2)] },
@@ -169,18 +150,13 @@ export async function fetchGA4TrafficRangeKpis(): Promise<DailyKpiRow[]> {
 
     const rows: DailyKpiRow[] = []
 
-    // Website property ONLY. This is the "Traffic & Acquisition" (website)
-    // page, and ga_geo breakdowns are already website-only. Combining the
-    // Sahal Wallet app property here would add its de-duplicated user count
-    // while contributing almost no "sessions" (Firebase counts sessions
-    // differently), which re-creates the impossible Users > Sessions on short
-    // windows. App traffic belongs to the App Performance page.
+    // ---- Headline totals + channel + sources, per range ----
     for (const [range, w] of Object.entries(ranges)) {
+      // Totals (current + previous).
       const [current, previous] = await Promise.all([
-        periodTotals(client, webProperty, w.cur[0], w.cur[1]),
-        periodTotals(client, webProperty, w.prev[0], w.prev[1]),
+        periodTotals(client, property, w.cur[0], w.cur[1]),
+        periodTotals(client, property, w.prev[0], w.prev[1]),
       ])
-
       for (const metric of metricNames) {
         rows.push({
           date: today,
@@ -190,11 +166,80 @@ export async function fetchGA4TrafficRangeKpis(): Promise<DailyKpiRow[]> {
           period_comparison_pct: pctChange(current[metric], previous[metric]),
         })
       }
+
+      // Channel breakdown (sessions per channel).
+      try {
+        const chResp = await client.properties.runReport({
+          property,
+          requestBody: {
+            dateRanges: [{ startDate: w.cur[0], endDate: w.cur[1] }],
+            dimensions: [{ name: 'sessionDefaultChannelGroup' }],
+            metrics: [{ name: 'sessions' }],
+            orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+            limit: '25',
+          },
+        })
+        for (const row of chResp.data.rows ?? []) {
+          const channel = row.dimensionValues?.[0]?.value || '(not set)'
+          rows.push({
+            date: today,
+            source: 'ga4',
+            metric_name: `traffic_chan_${range}${SEP}${channel}`,
+            metric_value: toNum(row.metricValues?.[0]?.value),
+            period_comparison_pct: null,
+          })
+        }
+      } catch (err) {
+        console.error(`[ga4-range-kpis] channel ${range} failed:`, err)
+      }
+
+      // Top sources/medium (sessions + users + bounce), top 10 by sessions.
+      try {
+        const srcResp = await client.properties.runReport({
+          property,
+          requestBody: {
+            dateRanges: [{ startDate: w.cur[0], endDate: w.cur[1] }],
+            dimensions: [{ name: 'sessionSource' }, { name: 'sessionMedium' }],
+            metrics: [{ name: 'sessions' }, { name: 'activeUsers' }, { name: 'bounceRate' }],
+            orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
+            limit: '10',
+          },
+        })
+        for (const row of srcResp.data.rows ?? []) {
+          const src = row.dimensionValues?.[0]?.value || '(not set)'
+          const med = row.dimensionValues?.[1]?.value || '(not set)'
+          const base = `traffic_src_${range}${SEP}${src}${SEP}${med}${SEP}`
+          rows.push({ date: today, source: 'ga4', metric_name: `${base}sessions`, metric_value: toNum(row.metricValues?.[0]?.value), period_comparison_pct: null })
+          rows.push({ date: today, source: 'ga4', metric_name: `${base}users`, metric_value: toNum(row.metricValues?.[1]?.value), period_comparison_pct: null })
+          rows.push({ date: today, source: 'ga4', metric_name: `${base}bounce`, metric_value: toNum(row.metricValues?.[2]?.value) * 100, period_comparison_pct: null })
+        }
+      } catch (err) {
+        console.error(`[ga4-range-kpis] sources ${range} failed:`, err)
+      }
     }
 
-    void appProperty
-    console.log(`[ga4-range-kpis] Built ${rows.length} daily_kpis rows across ${Object.keys(ranges).length} ranges (website property).`)
+    // ---- Daily trend (per-date, range-independent), one 90-day query ----
+    try {
+      const trendResp = await client.properties.runReport({
+        property,
+        requestBody: {
+          dateRanges: [{ startDate: ago(89), endDate: today }],
+          dimensions: [{ name: 'date' }],
+          metrics: [{ name: 'sessions' }, { name: 'activeUsers' }],
+          orderBys: [{ dimension: { dimensionName: 'date' } }],
+        },
+      })
+      for (const row of trendResp.data.rows ?? []) {
+        const d = formatGA4Date(row.dimensionValues?.[0]?.value)
+        if (!d) continue
+        rows.push({ date: d, source: 'ga4', metric_name: 'traffic_trend_sessions', metric_value: toNum(row.metricValues?.[0]?.value), period_comparison_pct: null })
+        rows.push({ date: d, source: 'ga4', metric_name: 'traffic_trend_users', metric_value: toNum(row.metricValues?.[1]?.value), period_comparison_pct: null })
+      }
+    } catch (err) {
+      console.error('[ga4-range-kpis] trend failed:', err)
+    }
 
+    console.log(`[ga4-range-kpis] Built ${rows.length} daily_kpis rows (website property; totals + channel + sources + trend).`)
     return rows
   } catch (error) {
     console.error('[ga4-range-kpis] fetchGA4TrafficRangeKpis failed:', error)
