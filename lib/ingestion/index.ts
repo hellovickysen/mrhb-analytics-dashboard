@@ -33,6 +33,7 @@ import {
   fetchGA4AppEvents,
   fetchGA4AppTraffic,
 } from '@/lib/api-clients/google-analytics'
+import { fetchGA4TrafficRangeKpis } from '@/lib/api-clients/ga4-range-kpis'
 import { fetchGSCQueries, fetchGSCPages } from '@/lib/api-clients/search-console'
 import {
   fetchPlayInstalls,
@@ -116,6 +117,7 @@ const CONFLICT_COLUMNS = {
   shortio_clicks: ['date', 'link_id', 'country', 'city', 'os', 'browser', 'referrer'],
   clarity_sessions: ['date'],
   clarity_friction: ['date', 'page_url'],
+  daily_kpis: ['date', 'source', 'metric_name'],
 } as const satisfies Record<string, string[]>
 
 /* ------------------------------------------------------------------------ */
@@ -195,6 +197,15 @@ function buildTasksForSource(
           table: 'ga_traffic',
           conflictColumns: CONFLICT_COLUMNS.ga_traffic,
           fetch: () => fetchGA4AppTraffic(startDate, endDate),
+        },
+        // Authoritative per-range traffic KPIs (de-duplicated users/sessions
+        // per standard dashboard range, web + app, current vs previous) written
+        // to daily_kpis. Independent of [startDate, endDate] — it computes its
+        // own per-range windows so the Traffic page KPI cards are exact.
+        {
+          table: 'daily_kpis',
+          conflictColumns: CONFLICT_COLUMNS.daily_kpis,
+          fetch: () => fetchGA4TrafficRangeKpis(),
         },
       ]
 
