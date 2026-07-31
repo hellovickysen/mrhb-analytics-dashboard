@@ -114,8 +114,14 @@ function combine(a: Totals, b: Totals): Totals {
 }
 
 function pctChange(current: number, previous: number): number | null {
-  if (previous > 0) return ((current - previous) / previous) * 100
-  return null // no comparable baseline — leave null rather than a misleading 100%
+  // No comparable baseline — leave null rather than a misleading 100%.
+  if (previous <= 0) return null
+  const pct = ((current - previous) / previous) * 100
+  // When the prior window predates the property's data history the baseline is
+  // near-zero, producing absurd five-figure swings (e.g. 82950%). Treat
+  // anything beyond ±500% as "no comparable baseline" too.
+  if (Math.abs(pct) > 500) return null
+  return pct
 }
 
 /**
