@@ -210,6 +210,11 @@ async function getTrafficData(searchParams?: { range?: string }): Promise<Traffi
         .select('date, sessions, users, new_users, bounce_rate, avg_session_duration, channel, source, medium')
         .gte('date', startDate)
         .lte('date', endDate)
+        // Website-only, to match the website-property KPI cards and GA4's own
+        // website report. Ingestion tags website rows with campaign=null and
+        // Sahal Wallet app rows with campaign='(not set)', so this cleanly
+        // excludes app traffic (which belongs to the App Performance page).
+        .is('campaign', null)
         .order('date', { ascending: true }),
       supabase
         .from('ga_geo')
