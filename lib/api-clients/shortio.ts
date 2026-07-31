@@ -302,62 +302,6 @@ export async function fetchAllShortIOData(
       }
     }
 
-    // Authoritative per-day totals (domain_daily) over the last DAILY_DAYS.
-    // Short.io's single daily-chart series is unreliable for per-day TOTAL
-    // clicks — it approximates human/day, does not sum to the period total,
-    // and its magnitude shifts with the query window. So instead we query each
-    // day individually with a [day, day+1) window (endDate is exclusive) and
-    // read that day's authoritative clicks / humanClicks. This makes every
-    // dashboard range (today / yesterday / 7d / 30d / 90d) exact for both the
-    // KPI cards and the trend. Requests are chunked to stay within the 120s
-    // function budget; a failed day is skipped (not written as 0) so a
-    // transient error never overwrites a previously-good row.
-    const days: string[] = []
-    for (let i = DAILY_DAYS - 1; i >= 0; i--) {
-      days.push(iso(new Date(now.getTime() - i * DAY_MS)))
-    }
-
-    for (let i = 0; i < days.length; i += DAILY_CONCURRENCY) {
-      const batch = days.slice(i, i + DAILY_CONCURRENCY)
-      const settled = await Promise.all(
-        batch.map(async (day) => {
-          const nextStr = iso(new Date(new Date(`${day}T00:00:00.000Z`).getTime() + DAY_MS))
-          const params = new URLSearchParams({
-            period: 'custom',
-            startDate: day,
-            endDate: nextStr,
-            tz: 'UTC',
-          })
-          try {
-            const s = await shortioFetch(
-              `${STATS_BASE}/statistics/domain/${domainId}?${params.toString()}`,
-              apiKey
-            )
-            return { day, total: Number(s.clicks) || 0, human: Number(s.humanClicks) || 0, ok: true }
-          } catch (err) {
-            console.error(`[shortio] per-day fetch failed for ${day}:`, err)
-            return { day, total: 0, human: 0, ok: false }
-          }
-        })
-      )
-
-      for (const r of settled) {
-        if (!r.ok) continue
-        clickRows.push({
-          date: r.day,
-          link_id: 'domain_daily',
-          total_clicks: r.total,
-          // Guard: human can never exceed total for a day.
-          human_clicks: Math.min(Math.max(0, r.human), r.total),
-          country: 'ALL',
-          city: 'ALL',
-          os: 'ALL',
-          browser: 'ALL',
-          referrer: 'ALL',
-        })
-      }
-    }
-
     // Authoritative per-range period totals. Short.io's period "clicks" count
     // does NOT equal the sum of its per-day series for longer windows: older
     // per-day/granular data is decimated while the aggregate period counter is
@@ -457,6 +401,62 @@ export async function fetchAllShortIOData(
           country: 'ALL',
           city: 'ALL',
           os: o.os || 'Unknown',
+          browser: 'ALL',
+          referrer: 'ALL',
+        })
+      }
+    }
+
+    // Authoritative per-day totals (domain_daily) over the last DAILY_DAYS.
+    // Short.io's single daily-chart series is unreliable for per-day TOTAL
+    // clicks — it approximates human/day, does not sum to the period total,
+    // and its magnitude shifts with the query window. So instead we query each
+    // day individually with a [day, day+1) window (endDate is exclusive) and
+    // read that day's authoritative clicks / humanClicks. This makes every
+    // dashboard range (today / yesterday / 7d / 30d / 90d) exact for both the
+    // KPI cards and the trend. Requests are chunked to stay within the 120s
+    // function budget; a failed day is skipped (not written as 0) so a
+    // transient error never overwrites a previously-good row.
+    const days: string[] = []
+    for (let i = DAILY_DAYS - 1; i >= 0; i--) {
+      days.push(iso(new Date(now.getTime() - i * DAY_MS)))
+    }
+
+    for (let i = 0; i < days.length; i += DAILY_CONCURRENCY) {
+      const batch = days.slice(i, i + DAILY_CONCURRENCY)
+      const settled = await Promise.all(
+        batch.map(async (day) => {
+          const nextStr = iso(new Date(new Date(`${day}T00:00:00.000Z`).getTime() + DAY_MS))
+          const params = new URLSearchParams({
+            period: 'custom',
+            startDate: day,
+            endDate: nextStr,
+            tz: 'UTC',
+          })
+          try {
+            const s = await shortioFetch(
+              `${STATS_BASE}/statistics/domain/${domainId}?${params.toString()}`,
+              apiKey
+            )
+            return { day, total: Number(s.clicks) || 0, human: Number(s.humanClicks) || 0, ok: true }
+          } catch (err) {
+            console.error(`[shortio] per-day fetch failed for ${day}:`, err)
+            return { day, total: 0, human: 0, ok: false }
+          }
+        })
+      )
+
+      for (const r of settled) {
+        if (!r.ok) continue
+        clickRows.push({
+          date: r.day,
+          link_id: 'domain_daily',
+          total_clicks: r.total,
+          // Guard: human can never exceed total for a day.
+          human_clicks: Math.min(Math.max(0, r.human), r.total),
+          country: 'ALL',
+          city: 'ALL',
+          os: 'ALL',
           browser: 'ALL',
           referrer: 'ALL',
         })
