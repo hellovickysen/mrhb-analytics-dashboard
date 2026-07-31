@@ -254,7 +254,15 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
     supabase
       .from('shortio_clicks')
       .select('date, link_id, total_clicks, human_clicks, country, os, referrer')
-      .in('link_id', [`range_${rangeKey}`, 'by_social', 'by_country', 'by_os'])
+      .in('link_id', [
+        `range_${rangeKey}`,
+        `by_social_${rangeKey}`,
+        `by_country_${rangeKey}`,
+        `by_os_${rangeKey}`,
+        'by_social',
+        'by_country',
+        'by_os',
+      ])
       .gte('date', snapshotCutoff),
   ])
 
@@ -303,12 +311,20 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
       secondaryValue: clicksByDate[date].human,
     }))
 
+  // Breakdown rows are range-scoped: prefer the by_*_<rangeKey> rows so the
+  // Platform / Country / Device sections follow the selected date range, and
+  // fall back to the fixed 30-day rows only if a per-range row is missing.
+  const pickBreakdown = (perRange: string, fallback: string) => {
+    const scoped = latestRows.filter((c) => c.link_id === perRange)
+    return scoped.length > 0 ? scoped : latestRows.filter((c) => c.link_id === fallback)
+  }
+
   // Platform performance: sourced from the by_social breakdown rows, which
   // mirror Short.io's "Top social referrers" (platform-level totals that
   // aggregate every referrer host for a platform). These are TOTAL clicks
   // (bot+human) — Short.io provides no per-platform human split. Rendered
   // dynamically from whatever platforms Short.io reports, styled via lookup.
-  const socialRows = latestRows.filter((c) => c.link_id === 'by_social')
+  const socialRows = pickBreakdown(`by_social_${rangeKey}`, 'by_social')
   const clicksBySocial = socialRows.reduce<Record<string, number>>((acc, c) => {
     if (!c.referrer) return acc
     acc[c.referrer] = (acc[c.referrer] ?? 0) + (c.total_clicks ?? 0)
@@ -334,7 +350,7 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
     .sort((a, b) => b.clicks - a.clicks)
 
   // Geographic breakdown: per-country TOTAL clicks from the by_country rows.
-  const countryRows = latestRows.filter((c) => c.link_id === 'by_country')
+  const countryRows = pickBreakdown(`by_country_${rangeKey}`, 'by_country')
   const clicksByCountry = countryRows.reduce<Record<string, number>>((acc, c) => {
     if (!c.country || c.country === 'ALL') return acc
     acc[c.country] = (acc[c.country] ?? 0) + (c.total_clicks ?? 0)
@@ -346,7 +362,7 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
     .map(([label, value]) => ({ label, value }))
 
   // Device split: per-OS TOTAL clicks from the by_os rows.
-  const osRows = latestRows.filter((c) => c.link_id === 'by_os')
+  const osRows = pickBreakdown(`by_os_${rangeKey}`, 'by_os')
   const clicksByOs = osRows.reduce<Record<string, number>>((acc, c) => {
     if (!c.os || c.os === 'ALL') return acc
     acc[c.os] = (acc[c.os] ?? 0) + (c.total_clicks ?? 0)
@@ -446,8 +462,8 @@ export default async function SocialPage({
             No clicks recorded in this period yet.
           </p>
           <p className="mt-1 text-xs text-mrhb-dark/60">
-            The click totals and trend below are for the selected date range. The platform,
-            country, and device breakdowns reflect the last 30 days.
+            The click totals, trend, and platform/country/device breakdowns below are all for
+            the selected date range.
           </p>
         </div>
       )}
@@ -484,7 +500,7 @@ export default async function SocialPage({
       <div className="mb-6">
         <h3 className="mb-4 text-base font-semibold text-mrhb-dark">
           Platform Performance{' '}
-          <span className="text-xs font-normal text-mrhb-dark/40">&middot; last 30 days</span>
+          <span className="text-xs font-normal text-mrhb-dark/40">&middot; {rangeLabel}</span>
         </h3>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {data.platforms.map((platform) => {
@@ -559,7 +575,7 @@ export default async function SocialPage({
       <div>
         <h3 className="mb-4 text-base font-semibold text-mrhb-dark">
           Geographic Breakdown{' '}
-          <span className="text-xs font-normal text-mrhb-dark/40">&middot; last 30 days</span>
+          <span className="text-xs font-normal text-mrhb-dark/40">&middot; {rangeLabel}</span>
         </h3>
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <BarChart

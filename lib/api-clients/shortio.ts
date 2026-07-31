@@ -387,7 +387,17 @@ export async function fetchAllShortIOData(
             `${STATS_BASE}/statistics/domain/${domainId}?${params.toString()}`,
             apiKey
           )
-          return { key: r.key, total: Number(s.clicks) || 0, human: Number(s.humanClicks) || 0 }
+          // The same period call also returns range-scoped dimensional
+          // breakdowns (social / country / os), so we capture them here and
+          // store per-range breakdown rows — no extra API calls needed.
+          return {
+            key: r.key,
+            total: Number(s.clicks) || 0,
+            human: Number(s.humanClicks) || 0,
+            social: Array.isArray(s.social) ? s.social : [],
+            country: Array.isArray(s.country) ? s.country : [],
+            os: Array.isArray(s.os) ? s.os : [],
+          }
         } catch (err) {
           console.error(`[shortio] range ${r.key} fetch failed:`, err)
           return null
@@ -396,6 +406,7 @@ export async function fetchAllShortIOData(
     )
     for (const rr of rangeResults) {
       if (!rr) continue
+      // Authoritative per-range total.
       clickRows.push({
         date: today,
         link_id: `range_${rr.key}`,
@@ -407,6 +418,49 @@ export async function fetchAllShortIOData(
         browser: 'ALL',
         referrer: 'ALL',
       })
+      // Per-range social/platform breakdown (by_social_<key>).
+      for (const s of rr.social) {
+        clickRows.push({
+          date: today,
+          link_id: `by_social_${rr.key}`,
+          total_clicks: s.score || 0,
+          human_clicks: 0,
+          country: 'ALL',
+          city: 'ALL',
+          os: 'ALL',
+          browser: 'ALL',
+          referrer: s.social || 'Unknown',
+        })
+      }
+      // Per-range country breakdown (by_country_<key>).
+      for (const c of rr.country) {
+        const countryName = c.countryName || c.country || 'Unknown'
+        clickRows.push({
+          date: today,
+          link_id: `by_country_${rr.key}`,
+          total_clicks: c.score || 0,
+          human_clicks: 0,
+          country: countryName,
+          city: countryName,
+          os: 'ALL',
+          browser: 'ALL',
+          referrer: 'ALL',
+        })
+      }
+      // Per-range OS/device breakdown (by_os_<key>).
+      for (const o of rr.os) {
+        clickRows.push({
+          date: today,
+          link_id: `by_os_${rr.key}`,
+          total_clicks: o.score || 0,
+          human_clicks: 0,
+          country: 'ALL',
+          city: 'ALL',
+          os: o.os || 'Unknown',
+          browser: 'ALL',
+          referrer: 'ALL',
+        })
+      }
     }
 
     console.log(`[shortio] Fetched ${links.length} links; 30d period total ${Number(stats.clicks) || 0} / human ${Number(stats.humanClicks) || 0}; ${days.length}-day per-day series; ${rangeResults.filter(Boolean).length} range totals; ${clickRows.length} click rows total`)
