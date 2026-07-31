@@ -2,7 +2,6 @@
 
 import { useState } from 'react'
 import Sidebar from '@/components/layout/Sidebar'
-import DataFreshnessBar from '@/components/layout/DataFreshnessBar'
 import { Menu, X } from 'lucide-react'
 import { MRHB_LOGO } from '@/lib/utils/logo'
 
@@ -49,10 +48,6 @@ export default function DashboardLayout({
             <p className="font-syne text-[10px] tracking-widest text-mrhb-blue">ANALYTICS</p>
           </div>
         </div>
-
-        {/* Dashboard-wide data-freshness indicator (from data_sync_log) */}
-        <DataFreshnessBar />
-
         {children}
       </main>
     </div>
