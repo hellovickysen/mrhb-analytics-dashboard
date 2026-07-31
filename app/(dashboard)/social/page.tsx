@@ -245,7 +245,7 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
     })
   )
 
-  // Click trend: group by date.
+  // Click trend: group by date..
   const clicksByDate = dailyClicks.reduce<Record<string, { total: number; human: number }>>(
     (acc, c) => {
       const bucket = acc[c.date] ?? { total: 0, human: 0 }
