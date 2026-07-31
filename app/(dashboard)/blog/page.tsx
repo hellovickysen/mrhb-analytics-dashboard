@@ -12,19 +12,20 @@ import { getDateWindow } from '@/lib/utils/date-range'
 // Data fetching
 // ---------------------------------------------------------------------------
 // Server Component — combines GA4 pageview data (`ga_pages`, filtered to the
-// `/blogs/` path — see lib/types/index.ts `GAPage`) with Search Console page
-// data (`gsc_pages`, `GSCPage`) so each post shows engagement and
-// search-visibility signals side by side. PostgREST has no server-side GROUP
-// BY, so raw rows are pulled for the window and aggregated in JS.
+// `/blogs/` path) with Search Console page data (`gsc_pages`) so each post
+// shows engagement and search-visibility signals side by side.
 //
-// Note on "Blog traffic by source": `ga_traffic` (see `GATraffic`) has no
-// landing-page/path column, so it can't be filtered to blog-only sessions
-// directly. As a reasonable approximation, the overall channel mix from
-// `ga_traffic` is scaled down to blog's share of total pageviews (blog
-// pageviews / total site pageviews from `ga_pages`) — a proxy, not an exact
-// blog-only breakdown. Falls back to mock data whenever Supabase returns an
-// error or zero rows (missing table, RLS not yet configured, or a genuinely
-// quiet period).
+// Two important data facts handled here:
+//   1. `ga_pages` is populated via the corrected pages fetcher (the original
+//      requested invalid GA4 metrics and returned nothing).
+//   2. `gsc_pages.page` is a FULL URL (https://mrhb.network/blogs/...), while
+//      `ga_pages.page_path` is a PATH (/blogs/...). We match `%/blogs/%` for
+//      the GSC filter and normalize URL -> path before joining the two.
+//
+// Reads are bounded on both ends of the window. `scroll depth` has no GA4
+// per-page equivalent (it lives on site-wide Clarity data), so it is shown as
+// a typical sample value, not a per-post measurement. Falls back to sample
+// data only when there is no blog pageview history at all.
 
 interface BlogPostRow {
   title: string
@@ -60,9 +61,6 @@ function buildBlogTrafficTrend(): AreaChartDataPoint[] {
     'Jul 15', 'Jul 16', 'Jul 17', 'Jul 18', 'Jul 19', 'Jul 20', 'Jul 21',
     'Jul 22', 'Jul 23',
   ]
-  // Blog pageviews (filtered to /blogs/) — smaller volume than total site
-  // traffic, with a visible bump around Jul 15 from a "Halal DeFi Explained"
-  // social share spike.
   const pageviews = [
     680, 710, 695, 660, 590, 560, 605,
     740, 760, 750, 705, 640, 615, 655,
@@ -162,9 +160,6 @@ const MOCK_BLOG: BlogData = {
       searchPosition: 4.6,
     },
   ],
-  // Content gap analysis: posts ranking well in impressions but converting
-  // very few of those impressions into clicks — prime candidates for
-  // title/meta-description or on-page CTR optimization.
   contentGaps: [
     { title: 'Is Bitcoin Haram? Scholars Weigh In', impressions: 27340, clicks: 610 },
     { title: 'Is Crypto Halal or Haram? A Complete Guide', impressions: 22140, clicks: 780 },
@@ -183,13 +178,16 @@ const MOCK_BLOG: BlogData = {
   ],
 }
 
-/** Percent change of `current` vs `previous`, guarding divide-by-zero. */
+/** Percent change of `current` vs `previous`. Returns 0 when there's no
+ * comparable baseline or the swing is implausibly large (avoids misleading
+ * 100%/five-figure percentages). */
 function pctChange(current: number, previous: number): number {
-  if (!previous) return current > 0 ? 100 : 0
-  return ((current - previous) / previous) * 100
+  if (!previous) return 0
+  const pct = ((current - previous) / previous) * 100
+  if (Math.abs(pct) > 500) return 0
+  return pct
 }
 
-/** Formats a `YYYY-MM-DD` string as "Jul 23" to match the mock trend labels. */
 function formatShortDate(dateStr: string): string {
   const d = new Date(`${dateStr}T00:00:00Z`)
   if (Number.isNaN(d.getTime())) return dateStr
@@ -198,13 +196,17 @@ function formatShortDate(dateStr: string): string {
 
 const BLOG_PATH_PREFIX = '/blogs/'
 
+/** gsc_pages.page is a full URL; reduce it to a path so it can join ga_pages. */
+function toPath(pageOrUrl: string): string {
+  return pageOrUrl.replace(/^https?:\/\/[^/]+/, '')
+}
+
 interface GaPageWindowRow {
   date: string
   page_path: string
   page_title: string | null
   pageviews: number
   avg_time_on_page: number
-  exit_rate: number
 }
 
 interface GscPageWindowRow {
@@ -224,26 +226,29 @@ async function getBlogData(searchParams?: { range?: string }): Promise<BlogData>
   try {
     const supabase = createServiceClient()
 
-    const { startDate, prevStartDate } = getDateWindow(searchParams)
+    const { startDate, endDate, prevStartDate } = getDateWindow(searchParams)
     const since60d = prevStartDate
     const cutoff30d = startDate
 
     const [blogPagesResult, gscPagesResult, allPagesResult, trafficResult] = await Promise.all([
       supabase
         .from('ga_pages')
-        .select('date, page_path, page_title, pageviews, avg_time_on_page, exit_rate')
+        .select('date, page_path, page_title, pageviews, avg_time_on_page')
         .like('page_path', `${BLOG_PATH_PREFIX}%`)
         .gte('date', since60d)
+        .lte('date', endDate)
         .order('date', { ascending: true }),
+      // gsc_pages.page is a FULL URL, so match the blog path ANYWHERE in it.
       supabase
         .from('gsc_pages')
         .select('date, page, impressions, clicks, position')
-        .like('page', `${BLOG_PATH_PREFIX}%`)
-        .gte('date', since60d),
+        .like('page', `%${BLOG_PATH_PREFIX}%`)
+        .gte('date', since60d)
+        .lte('date', endDate),
       // Total site pageviews (unfiltered) for the current window — used only
       // to estimate blog's share of traffic for the by-source approximation.
-      supabase.from('ga_pages').select('pageviews').gte('date', cutoff30d),
-      supabase.from('ga_traffic').select('channel, sessions').gte('date', cutoff30d),
+      supabase.from('ga_pages').select('pageviews').gte('date', cutoff30d).lte('date', endDate),
+      supabase.from('ga_traffic').select('channel, sessions').gte('date', cutoff30d).lte('date', endDate),
     ])
 
     const blogRowsRaw = (
@@ -252,9 +257,7 @@ async function getBlogData(searchParams?: { range?: string }): Promise<BlogData>
 
     const gscRowsRaw = !gscPagesResult.error && gscPagesResult.data ? (gscPagesResult.data as GscPageWindowRow[]) : []
 
-    // No blog pageview history at all (missing table / RLS / empty DB / no
-    // posts under /blogs/ yet) — fall back to the full mock payload rather
-    // than mixing partial data.
+    // No blog pageview history at all — fall back to the full sample payload.
     if (blogRowsRaw.length === 0) {
       return MOCK_BLOG
     }
@@ -263,44 +266,40 @@ async function getBlogData(searchParams?: { range?: string }): Promise<BlogData>
     const previousRows = blogRowsRaw.filter((r) => r.date < cutoff30d)
 
     const sumPageviews = (rows: GaPageWindowRow[]) => rows.reduce((total, row) => total + (row.pageviews ?? 0), 0)
-    const avgTimeOnPage = (rows: GaPageWindowRow[]) =>
-      rows.length > 0 ? rows.reduce((total, row) => total + (row.avg_time_on_page ?? 0), 0) / rows.length : 0
+    // Pageview-weighted average read time (not a simple mean of daily rows).
+    const avgTimeOnPage = (rows: GaPageWindowRow[]) => {
+      const pv = sumPageviews(rows)
+      return pv > 0 ? rows.reduce((t, r) => t + (r.avg_time_on_page ?? 0) * (r.pageviews ?? 0), 0) / pv : 0
+    }
 
     const totalBlogViewsCurrent = sumPageviews(currentRows)
     const totalBlogViewsPrevious = sumPageviews(previousRows)
     const avgReadTimeCurrent = avgTimeOnPage(currentRows)
     const avgReadTimePrevious = avgTimeOnPage(previousRows)
 
-    // Per-post aggregation (current window) — grouped by page_path, since a
-    // given post can have multiple daily rows.
-    const postAgg = new Map<
-      string,
-      { title: string; pageviews: number; timeSum: number; timeCount: number }
-    >()
+    // Per-post aggregation (current window) — grouped by page_path.
+    const postAgg = new Map<string, { title: string; pageviews: number; timeW: number }>()
     for (const row of currentRows) {
       const entry = postAgg.get(row.page_path) ?? {
         title: row.page_title ?? row.page_path,
         pageviews: 0,
-        timeSum: 0,
-        timeCount: 0,
+        timeW: 0,
       }
       entry.pageviews += row.pageviews ?? 0
-      entry.timeSum += row.avg_time_on_page ?? 0
-      entry.timeCount += 1
+      entry.timeW += (row.avg_time_on_page ?? 0) * (row.pageviews ?? 0)
       postAgg.set(row.page_path, entry)
     }
 
-    // Search Console signals (impressions/clicks/avg position) per page,
-    // split into current and previous 30-day windows for change% + gaps.
+    // Search Console signals per PATH (normalized from full URL), current + prev.
     const buildGscAgg = (rows: GscPageWindowRow[]) => {
-      const agg = new Map<string, { impressions: number; clicks: number; positionSum: number; count: number }>()
+      const agg = new Map<string, { impressions: number; clicks: number; posW: number }>()
       for (const row of rows) {
-        const entry = agg.get(row.page) ?? { impressions: 0, clicks: 0, positionSum: 0, count: 0 }
+        const path = toPath(row.page)
+        const entry = agg.get(path) ?? { impressions: 0, clicks: 0, posW: 0 }
         entry.impressions += row.impressions ?? 0
         entry.clicks += row.clicks ?? 0
-        entry.positionSum += row.position ?? 0
-        entry.count += 1
-        agg.set(row.page, entry)
+        entry.posW += (row.position ?? 0) * (row.impressions ?? 0)
+        agg.set(path, entry)
       }
       return agg
     }
@@ -308,27 +307,31 @@ async function getBlogData(searchParams?: { range?: string }): Promise<BlogData>
     const gscPreviousRows = gscRowsRaw.filter((r) => r.date < cutoff30d)
     const gscAgg = buildGscAgg(gscCurrentRows)
 
+    // Match GSC rows to blog posts. ga_pages paths may or may not have a
+    // trailing slash vs GSC; try exact, then with/without trailing slash.
+    const gscFor = (path: string) => {
+      const alt = path.endsWith('/') ? path.slice(0, -1) : `${path}/`
+      return gscAgg.get(path) ?? gscAgg.get(alt)
+    }
+
     const postsWithPath = Array.from(postAgg.entries()).map(([path, agg]) => {
-      const gsc = gscAgg.get(path)
+      const gsc = gscFor(path)
       return {
         path,
         title: agg.title,
         pageviews: agg.pageviews,
-        avgTimeOnPage: agg.timeCount > 0 ? agg.timeSum / agg.timeCount : 0,
+        avgTimeOnPage: agg.pageviews > 0 ? agg.timeW / agg.pageviews : 0,
         searchImpressions: gsc?.impressions ?? 0,
-        searchPosition: gsc && gsc.count > 0 ? gsc.positionSum / gsc.count : 0,
+        searchPosition: gsc && gsc.impressions > 0 ? gsc.posW / gsc.impressions : 0,
       }
     })
 
-    // Top posts by pageviews, top 10. `ga_pages` has no scroll-depth column
-    // (that lives on `clarity_sessions`, a site-wide, not per-page, metric),
-    // so scroll depth falls back to the matching mock post's typical value
-    // rather than fabricating a per-post number that doesn't exist yet.
     const postsByPageviews = [...postsWithPath].sort((a, b) => b.pageviews - a.pageviews)
     const topPosts: BlogPostRow[] = postsByPageviews.slice(0, 10).map((post, i) => ({
       title: post.title,
       pageviews: post.pageviews,
       avgTimeOnPage: post.avgTimeOnPage,
+      // No GA4 per-page scroll-depth metric exists; show a typical sample value.
       scrollDepth: MOCK_BLOG.topPosts[i % MOCK_BLOG.topPosts.length].scrollDepth,
       searchImpressions: post.searchImpressions,
       searchPosition: post.searchPosition,
@@ -346,7 +349,7 @@ async function getBlogData(searchParams?: { range?: string }): Promise<BlogData>
       0
     )
 
-    // Blog traffic trend — daily pageview totals for the current 30-day window.
+    // Blog traffic trend — daily pageview totals for the current window.
     const trendByDate = new Map<string, number>()
     for (const row of currentRows) {
       trendByDate.set(row.date, (trendByDate.get(row.date) ?? 0) + (row.pageviews ?? 0))
@@ -355,8 +358,7 @@ async function getBlogData(searchParams?: { range?: string }): Promise<BlogData>
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([date, value]) => ({ date: formatShortDate(date), value }))
 
-    // Content gap analysis — posts with high impressions but a low
-    // click-through rate (ranking, but not converting), from `gsc_pages`.
+    // Content gap analysis — high impressions, low CTR (from gsc_pages).
     const contentGaps: ContentGapRow[] = Array.from(gscAgg.entries())
       .map(([path, agg]) => ({
         title: postAgg.get(path)?.title ?? path,
@@ -367,9 +369,7 @@ async function getBlogData(searchParams?: { range?: string }): Promise<BlogData>
       .sort((a, b) => b.impressions - a.impressions)
       .slice(0, 8)
 
-    // Traffic by source — `ga_traffic` has no landing-page column, so this
-    // scales the overall channel mix down to blog's estimated share of total
-    // site pageviews (see file-level comment above). A proxy, not exact.
+    // Traffic by source — proxy: overall channel mix scaled to blog's share.
     let trafficBySource: DonutChartDataPoint[] = MOCK_BLOG.trafficBySource
     const totalSitePageviews = !allPagesResult.error && allPagesResult.data
       ? (allPagesResult.data as { pageviews: number }[]).reduce((t, r) => t + (r.pageviews ?? 0), 0)
@@ -401,8 +401,6 @@ async function getBlogData(searchParams?: { range?: string }): Promise<BlogData>
       trafficBySource,
     }
   } catch {
-    // Network failure, missing env vars, or any other unexpected error —
-    // the UI must always render, so fall all the way back to mock data.
     return MOCK_BLOG
   }
 }
@@ -475,7 +473,7 @@ export default async function BlogPage({
           change={data.avgReadTime.change}
           trend={getTrend(data.avgReadTime.change)}
           iconName="scroll-text"
-          tooltip="Average time readers spend on a blog article"
+          tooltip="Average time readers spend on a blog article (pageview-weighted)"
         />
         <KPICard
           title="Top Post Views"
@@ -516,7 +514,8 @@ export default async function BlogPage({
         {topPost && (
           <p className="mt-3 text-xs text-mrhb-dark/50">
             Leading post: <span className="font-medium text-mrhb-dark/70">{topPost.title}</span>{' '}
-            with {formatNumber(topPost.pageviews)} views and {formatPercent(topPost.scrollDepth)} average scroll depth.
+            with {formatNumber(topPost.pageviews)} views. Scroll depth is a representative sample
+            (GA4 has no per-page scroll metric).
           </p>
         )}
       </div>

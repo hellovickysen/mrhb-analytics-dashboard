@@ -27,12 +27,15 @@ import type { DataSource } from '@/lib/types'
 
 import {
   fetchGA4Traffic,
-  fetchGA4Pages,
   fetchGA4Events,
   fetchGA4Geo,
   fetchGA4AppEvents,
   fetchGA4AppTraffic,
 } from '@/lib/api-clients/google-analytics'
+// Corrected pages fetcher — the original google-analytics.fetchGA4Pages used
+// invalid GA4 metrics (exits/entrances) and always returned [], leaving
+// ga_pages empty. This one uses valid metrics only.
+import { fetchGA4Pages } from '@/lib/api-clients/ga4-pages-fix'
 import { fetchGA4TrafficRangeKpis } from '@/lib/api-clients/ga4-range-kpis'
 import { fetchGSCQueries, fetchGSCPages } from '@/lib/api-clients/search-console'
 import {
