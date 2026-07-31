@@ -163,18 +163,17 @@ export async function fetchGA4TrafficRangeKpis(): Promise<DailyKpiRow[]> {
 
     const rows: DailyKpiRow[] = []
 
-    // Process one range at a time; within a range fetch the web + app,
-    // current + previous windows in parallel (up to 4 calls).
+    // Website property ONLY. This is the "Traffic & Acquisition" (website)
+    // page, and ga_geo breakdowns are already website-only. Combining the
+    // Sahal Wallet app property here would add its de-duplicated user count
+    // while contributing almost no "sessions" (Firebase counts sessions
+    // differently), which re-creates the impossible Users > Sessions on short
+    // windows. App traffic belongs to the App Performance page.
     for (const [range, w] of Object.entries(ranges)) {
-      const [webCur, webPrev, appCur, appPrev] = await Promise.all([
+      const [current, previous] = await Promise.all([
         periodTotals(client, webProperty, w.cur[0], w.cur[1]),
         periodTotals(client, webProperty, w.prev[0], w.prev[1]),
-        appProperty ? periodTotals(client, appProperty, w.cur[0], w.cur[1]) : Promise.resolve(ZERO),
-        appProperty ? periodTotals(client, appProperty, w.prev[0], w.prev[1]) : Promise.resolve(ZERO),
       ])
-
-      const current = combine(webCur, appCur)
-      const previous = combine(webPrev, appPrev)
 
       for (const metric of metricNames) {
         rows.push({
@@ -187,7 +186,8 @@ export async function fetchGA4TrafficRangeKpis(): Promise<DailyKpiRow[]> {
       }
     }
 
-    console.log(`[ga4-range-kpis] Built ${rows.length} daily_kpis rows across ${Object.keys(ranges).length} ranges (web${appProperty ? ' + app' : ''}).`)
+    void appProperty
+    console.log(`[ga4-range-kpis] Built ${rows.length} daily_kpis rows across ${Object.keys(ranges).length} ranges (website property).`)
 
     return rows
   } catch (error) {
