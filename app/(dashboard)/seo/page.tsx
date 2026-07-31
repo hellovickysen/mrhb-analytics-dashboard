@@ -310,7 +310,7 @@ async function getSeoData(searchParams?: { range?: string }): Promise<SeoData> {
     // Position distribution — one entry per PAGE using its impression-weighted
     // position (not per query-day row), bucketed.
     const buckets = { '1-3': 0, '4-10': 0, '11-20': 0, '21-50': 0, '50+': 0 }
-    for (const [, a] of pageAgg) {
+    for (const a of Array.from(pageAgg.values())) {
       const p = a.impressions > 0 ? a.posW / a.impressions : 0
       if (p <= 3) buckets['1-3'] += 1
       else if (p <= 10) buckets['4-10'] += 1
