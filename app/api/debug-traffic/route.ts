@@ -1,43 +1,69 @@
 /**
- * TEMPORARY read-only diagnostic for characterizing ga_traffic pollution.
- * Remove after the cleanup is designed. Returns only aggregate counts — no
- * mutations. Gated by the app's existing auth (middleware).
+ * TEMPORARY read + one-time cleanup helper for ga_traffic. Remove after use.
+ *
+ *   GET  /api/debug-traffic            -> aggregate diagnostics (campaign dist,
+ *                                         duplicate-key detection, top sources)
+ *   GET  /api/debug-traffic?dump=1     -> ALL rows (paginated), for backup
+ *   POST /api/debug-traffic            -> body { action:'delete-all',
+ *                                         confirm:'YES_DELETE_GA_TRAFFIC' }
+ *                                         deletes every ga_traffic row.
+ *
+ * Read paths are safe; the POST is destructive and requires the exact confirm
+ * token. Gated by the app's existing auth (middleware).
  */
 import { NextResponse } from 'next/server'
 import { createServiceClient } from '@/lib/supabase/server'
 
-export const maxDuration = 60
+export const maxDuration = 120
 
-export async function GET() {
+async function fetchAllRows(supabase: ReturnType<typeof createServiceClient>) {
+  const all: any[] = []
+  const PAGE = 1000
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('ga_traffic')
+      .select('date, channel, source, medium, campaign, sessions, users, new_users, bounce_rate, avg_session_duration')
+      .order('date', { ascending: true })
+      .range(from, from + PAGE - 1)
+    if (error) throw new Error(error.message)
+    const rows = data ?? []
+    all.push(...rows)
+    if (rows.length < PAGE) break
+  }
+  return all
+}
+
+export async function GET(request: Request) {
   const supabase = createServiceClient()
+  const url = new URL(request.url)
 
-  // Pull a bounded slice for aggregation (JS-side, since PostgREST has no GROUP BY).
-  const { data, error, count } = await supabase
-    .from('ga_traffic')
-    .select('date, channel, source, medium, campaign, sessions, users', { count: 'exact' })
-    .order('date', { ascending: false })
-    .limit(20000)
-
-  if (error) {
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
+  if (url.searchParams.get('dump') === '1') {
+    try {
+      const rows = await fetchAllRows(supabase)
+      return NextResponse.json({ ok: true, count: rows.length, rows })
+    } catch (e) {
+      return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 })
+    }
   }
 
-  const rows = data ?? []
+  let rows: any[]
+  try {
+    rows = await fetchAllRows(supabase)
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 })
+  }
+
   const today = new Date().toISOString().slice(0, 10)
   const d30 = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10)
-
   const campaignKey = (c: unknown) => (c === null ? '__NULL__' : c === '' ? '__EMPTY__' : String(c))
 
-  // Distinct campaign values: rows + session sum (all fetched + last 30d).
   const byCampaign: Record<string, { rows: number; sessions: number; rows30: number; sessions30: number }> = {}
-  // For campaign NULL in last 30d: top source/medium by sessions.
   const nullSrc30: Record<string, number> = {}
-  // Duplicate detection on the full conflict key.
   const keyCounts = new Map<string, number>()
   let minDate = '9999'
   let maxDate = '0000'
 
-  for (const r of rows as any[]) {
+  for (const r of rows) {
     if (r.date < minDate) minDate = r.date
     if (r.date > maxDate) maxDate = r.date
     const ck = campaignKey(r.campaign)
@@ -65,12 +91,41 @@ export async function GET() {
 
   return NextResponse.json({
     ok: true,
-    totalRowCountExact: count,
-    fetchedRows: rows.length,
+    totalRowCount: rows.length,
     dateRange: { minDate, maxDate },
     byCampaign,
-    duplicateFullKeys: dupes.length,
+    duplicateKeys: dupes.length,
     duplicateSample: dupes.slice(0, 10).map(([k, n]) => ({ key: k, count: n })),
     last30_campaignNull_topSources: topNullSrc30,
   })
+}
+
+export async function POST(request: Request) {
+  let body: { action?: string; confirm?: string } = {}
+  try {
+    body = await request.json()
+  } catch {
+    return NextResponse.json({ ok: false, error: 'invalid JSON' }, { status: 400 })
+  }
+
+  if (body.action !== 'delete-all' || body.confirm !== 'YES_DELETE_GA_TRAFFIC') {
+    return NextResponse.json({ ok: false, error: 'requires { action:"delete-all", confirm:"YES_DELETE_GA_TRAFFIC" }' }, { status: 400 })
+  }
+
+  const supabase = createServiceClient()
+  // Count first (for the response), then delete every row.
+  const { count: before } = await supabase
+    .from('ga_traffic')
+    .select('*', { count: 'exact', head: true })
+
+  const { error } = await supabase.from('ga_traffic').delete().gte('date', '1900-01-01')
+  if (error) {
+    return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
+  }
+
+  const { count: after } = await supabase
+    .from('ga_traffic')
+    .select('*', { count: 'exact', head: true })
+
+  return NextResponse.json({ ok: true, deletedApprox: before ?? null, remaining: after ?? null })
 }

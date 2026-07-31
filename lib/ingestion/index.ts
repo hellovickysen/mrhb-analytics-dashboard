@@ -170,7 +170,15 @@ function buildTasksForSource(
         {
           table: 'ga_traffic',
           conflictColumns: CONFLICT_COLUMNS.ga_traffic,
-          fetch: () => fetchGA4Traffic(startDate, endDate),
+          // Website rows: force a NON-NULL campaign sentinel so the upsert's
+          // ON CONFLICT actually de-duplicates them. fetchGA4Traffic returns
+          // campaign=null (it doesn't request the campaign dimension), and
+          // Postgres treats NULL as DISTINCT in the UNIQUE(date,channel,source,
+          // medium,campaign) constraint — so null-campaign rows never matched
+          // ON CONFLICT and were re-inserted (duplicated 4-6x) on every sync.
+          // '(none)' stays distinct from the app fetcher's '(not set)'.
+          fetch: async () =>
+            (await fetchGA4Traffic(startDate, endDate)).map((r) => ({ ...r, campaign: '(none)' })),
         },
         {
           table: 'ga_pages',
