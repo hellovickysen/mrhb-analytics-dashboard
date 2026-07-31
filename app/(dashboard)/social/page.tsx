@@ -223,8 +223,9 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
     return MOCK_SOCIAL_DATA
   }
 
-  const totalClicks = clicks.reduce((sum, c) => sum + (c.total_clicks ?? 0), 0)
-  const humanClicks = clicks.reduce((sum, c) => sum + (c.human_clicks ?? 0), 0)
+  const dailyClicks = clicks.filter((c) => c.link_id === 'domain_daily')
+  const totalClicks = dailyClicks.reduce((sum, c) => sum + (c.total_clicks ?? 0), 0)
+  const humanClicks = dailyClicks.reduce((sum, c) => sum + (c.human_clicks ?? 0), 0)
 
   // Platform performance: group by referrer, mapped to a display platform.
   const humanClicksByReferrer = clicks.reduce<Record<string, number>>((acc, c) => {
@@ -245,7 +246,7 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
   )
 
   // Click trend: group by date.
-  const clicksByDate = clicks.reduce<Record<string, { total: number; human: number }>>(
+  const clicksByDate = dailyClicks.reduce<Record<string, { total: number; human: number }>>(
     (acc, c) => {
       const bucket = acc[c.date] ?? { total: 0, human: 0 }
       bucket.total += c.total_clicks ?? 0
