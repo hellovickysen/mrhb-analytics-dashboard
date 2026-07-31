@@ -292,21 +292,28 @@ export async function fetchAllShortIOData(
     }
 
     // Daily time-series rows — PRIMARY data source for date-range queries.
-    // Distribute human clicks proportionally across days, ensuring the
-    // total sum equals the exact period total (no rounding loss).
-    if (stats.clickStatistics?.datasets?.[0]?.data) {
-      const dailyPoints = stats.clickStatistics.datasets[0].data
-        .filter((p: any) => p.x && typeof p.y === 'number')
+    // Short.io returns clickStatistics.datasets[0].data as an array of
+    // { x: ISO-date, y: <clicks> } points where `y` is a NUMERIC STRING
+    // (e.g. "6"), not a number. Coerce with Number() before use — a strict
+    // `typeof y === 'number'` check silently drops every point and leaves
+    // the dashboard with zero domain_daily rows (the Social page then falls
+    // back to mock data). Distribute the period human-click total
+    // proportionally across days, with a rounding correction on the final
+    // day so the daily human clicks sum to the exact period total.
+    const rawDailyPoints = stats.clickStatistics?.datasets?.[0]?.data
+    if (Array.isArray(rawDailyPoints)) {
+      const dailyPoints = rawDailyPoints
+        .map((p: any) => ({ x: p?.x, y: Number(p?.y) }))
+        .filter((p: { x: any; y: number }) => p.x && Number.isFinite(p.y))
 
-      // Proportional distribution with rounding correction
+      const clicksSum = dailyPoints.reduce((s: number, p: { y: number }) => s + p.y, 0) || 1
+
       let humanRemaining = totalHuman
-      const dailyTotals = dailyPoints.map((p: any) => p.y || 0)
-      const clicksSum = dailyTotals.reduce((s: number, v: number) => s + v, 0) || 1
 
       for (let i = 0; i < dailyPoints.length; i++) {
         const point = dailyPoints[i]
-        const dateStr = (point.x || '').slice(0, 10)
-        const dailyTotal = point.y || 0
+        const dateStr = String(point.x).slice(0, 10)
+        const dailyTotal = point.y
 
         // Last day gets all remaining to guarantee exact total
         const dailyHuman = i === dailyPoints.length - 1

@@ -14,15 +14,26 @@ import { getDateWindow } from '@/lib/utils/date-range'
 // This is a Server Component. Reads Short.io's click-analytics export for
 // the mrhbnetwork.short.gy domain from `shortio_clicks` (daily click facts)
 // joined against `shortio_links` (the link registry) — see `ShortIOLink` /
-// `ShortIOClick` in lib/types/index.ts. supabase-js doesn't support
-// arbitrary server-side GROUP BY, so grouping/summing by referrer, date,
-// country, and OS happens client-side in JS after fetching the raw rows.
-// Falls back to the real Short.io dashboard totals (1,166 total clicks / 227
-// human clicks) with realistic mock detail whenever the tables are empty.
+// `ShortIOClick` in lib/types/index.ts.
+//
+// Rows are stored at mixed grain, distinguished by `link_id`:
+//   - 'domain_daily'  — one row per day, real per-day TOTAL clicks + a
+//                       proportional human-click split. Authoritative source
+//                       for the headline KPIs and the click trend.
+//   - 'by_referrer'   — per-referrer TOTAL clicks (bot+human) for platforms.
+//   - 'by_country'    — per-country TOTAL clicks for the geographic breakdown.
+//   - 'by_os'         — per-OS TOTAL clicks for the device split.
+//   - 'domain_total' / 'by_social' / 'by_browser' — other aggregates.
+// Each section below reads ONLY the rows at its own grain so aggregate/sentinel
+// rows never leak into another section's totals.
+//
+// If no 'domain_daily' rows exist, the Short.io sync hasn't produced usable
+// daily facts; the page then renders clearly-labelled SAMPLE data (never
+// presented as live) via the `isSourced` flag.
 
 interface PlatformRow {
   platform: string
-  humanClicks: number
+  clicks: number
   referrer: string
   colorFrom: string
   colorTo: string
@@ -47,11 +58,12 @@ interface SocialData {
   topLinks: TopLinkRow[]
   topCountries: BarChartDataPoint[]
   deviceSplit: DonutChartDataPoint[]
+  isSourced: boolean
 }
 
 // 30 daily points summing to the 1,166-click total, with human clicks
 // tracking roughly the observed ~19.5% human rate and a few referral spikes
-// around known campaign-push days.
+// around known campaign-push days. Used only for the SAMPLE fallback.
 function buildClickTrend(): AreaChartDataPoint[] {
   const dates = [
     'Jun 24', 'Jun 25', 'Jun 26', 'Jun 27', 'Jun 28', 'Jun 29', 'Jun 30',
@@ -76,8 +88,9 @@ function buildClickTrend(): AreaChartDataPoint[] {
   }))
 }
 
-// Real Short.io dashboard figures for mrhbnetwork.short.gy, used as the
-// fallback whenever `shortio_clicks` / `shortio_links` are empty.
+// Representative Short.io figures for mrhbnetwork.short.gy, used as clearly
+// labelled SAMPLE data (isSourced=false) whenever no daily click facts have
+// been synced. Never presented to the user as live analytics.
 const MOCK_SOCIAL_DATA: SocialData = {
   totalClicks: 1166,
   humanClicks: 227,
@@ -85,7 +98,7 @@ const MOCK_SOCIAL_DATA: SocialData = {
   platforms: [
     {
       platform: 'Twitter',
-      humanClicks: 77,
+      clicks: 77,
       referrer: 't.co',
       colorFrom: 'from-sky-400',
       colorTo: 'to-sky-600',
@@ -93,7 +106,7 @@ const MOCK_SOCIAL_DATA: SocialData = {
     },
     {
       platform: 'Telegram',
-      humanClicks: 8,
+      clicks: 8,
       referrer: 'ir.ilmili.telegraph',
       colorFrom: 'from-blue-400',
       colorTo: 'to-blue-600',
@@ -101,7 +114,7 @@ const MOCK_SOCIAL_DATA: SocialData = {
     },
     {
       platform: 'Facebook',
-      humanClicks: 6,
+      clicks: 6,
       referrer: 'm.facebook.com',
       colorFrom: 'from-indigo-400',
       colorTo: 'to-indigo-600',
@@ -109,7 +122,7 @@ const MOCK_SOCIAL_DATA: SocialData = {
     },
     {
       platform: 'LinkedIn',
-      humanClicks: 5,
+      clicks: 5,
       referrer: 'lnkd.in',
       colorFrom: 'from-blue-500',
       colorTo: 'to-blue-700',
@@ -117,7 +130,7 @@ const MOCK_SOCIAL_DATA: SocialData = {
     },
     {
       platform: 'Instagram',
-      humanClicks: 4,
+      clicks: 4,
       referrer: 'l.instagram.com',
       colorFrom: 'from-pink-400',
       colorTo: 'to-purple-600',
@@ -125,7 +138,7 @@ const MOCK_SOCIAL_DATA: SocialData = {
     },
     {
       platform: 'YouTube',
-      humanClicks: 3,
+      clicks: 3,
       referrer: 'www.youtube.com',
       colorFrom: 'from-red-400',
       colorTo: 'to-red-600',
@@ -180,6 +193,7 @@ const MOCK_SOCIAL_DATA: SocialData = {
     { name: 'Windows', value: 52, color: '#E5B897' },
     { name: 'Mac', value: 33, color: '#BFB4A6' },
   ],
+  isSourced: false,
 }
 
 // Referrer domain -> display platform + card styling. UI-only metadata that
@@ -212,40 +226,24 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
     .select('date, link_id, total_clicks, human_clicks, country, os, referrer')
     .gte('date', since)
 
-  const linksRes = await supabase.from('shortio_links').select('link_id, short_url, original_url')
-
   const clicks = clicksRes.data ?? []
-  const links = linksRes.data ?? []
 
-  const hasClicks = !clicksRes.error && clicks.length > 0
+  // Headline totals + trend come ONLY from the daily domain time-series rows
+  // (link_id='domain_daily'). If none exist, the Short.io sync hasn't produced
+  // usable daily facts, so we fall back to clearly-labelled sample data rather
+  // than presenting mock numbers as live analytics.
+  const dailyClicks = clicks.filter((c) => c.link_id === 'domain_daily')
+  const isSourced = !clicksRes.error && dailyClicks.length > 0
 
-  if (!hasClicks) {
-    return MOCK_SOCIAL_DATA
+  if (!isSourced) {
+    return { ...MOCK_SOCIAL_DATA, isSourced: false }
   }
 
-  const dailyClicks = clicks.filter((c) => c.link_id === 'domain_daily')
   const totalClicks = dailyClicks.reduce((sum, c) => sum + (c.total_clicks ?? 0), 0)
   const humanClicks = dailyClicks.reduce((sum, c) => sum + (c.human_clicks ?? 0), 0)
+  const botClicks = Math.max(0, totalClicks - humanClicks)
 
-  // Platform performance: group by referrer, mapped to a display platform.
-  const humanClicksByReferrer = clicks.reduce<Record<string, number>>((acc, c) => {
-    if (!c.referrer) return acc
-    acc[c.referrer] = (acc[c.referrer] ?? 0) + (c.human_clicks ?? 0)
-    return acc
-  }, {})
-
-  const platforms: PlatformRow[] = Object.entries(PLATFORM_STYLE_BY_REFERRER).map(
-    ([referrer, style]) => ({
-      platform: style.platform,
-      humanClicks: humanClicksByReferrer[referrer] ?? 0,
-      referrer,
-      colorFrom: style.colorFrom,
-      colorTo: style.colorTo,
-      textColor: style.textColor,
-    })
-  )
-
-  // Click trend: group by date..
+  // Click trend: one point per day, from the domain_daily rows only.
   const clicksByDate = dailyClicks.reduce<Record<string, { total: number; human: number }>>(
     (acc, c) => {
       const bucket = acc[c.date] ?? { total: 0, human: 0 }
@@ -264,53 +262,31 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
       secondaryValue: clicksByDate[date].human,
     }))
 
-  // Top links: aggregate clicks per link_id, then join against shortio_links
-  // for the human-readable short_url/original_url, plus each link's top
-  // country and top referrer by click volume.
-  const linkById = new Map(links.map((l) => [l.link_id, l]))
-  const perLink = new Map<
-    string,
-    {
-      totalClicks: number
-      humanClicks: number
-      countryCounts: Record<string, number>
-      referrerCounts: Record<string, number>
-    }
-  >()
-  for (const c of clicks) {
-    const entry =
-      perLink.get(c.link_id) ??
-      { totalClicks: 0, humanClicks: 0, countryCounts: {}, referrerCounts: {} }
-    entry.totalClicks += c.total_clicks ?? 0
-    entry.humanClicks += c.human_clicks ?? 0
-    if (c.country) entry.countryCounts[c.country] = (entry.countryCounts[c.country] ?? 0) + (c.total_clicks ?? 0)
-    if (c.referrer) entry.referrerCounts[c.referrer] = (entry.referrerCounts[c.referrer] ?? 0) + (c.total_clicks ?? 0)
-    perLink.set(c.link_id, entry)
-  }
-
-  const topEntry = (counts: Record<string, number>): string => {
-    const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1])
-    return sorted[0]?.[0] ?? '—'
-  }
-
-  const topLinks: TopLinkRow[] = Array.from(perLink.entries())
-    .map(([linkId, agg]) => {
-      const link = linkById.get(linkId)
-      return {
-        shortUrl: link?.short_url ?? linkId,
-        destination: link?.original_url ?? '—',
-        totalClicks: agg.totalClicks,
-        humanClicks: agg.humanClicks,
-        topCountry: topEntry(agg.countryCounts),
-        topReferrer: topEntry(agg.referrerCounts),
-      }
+  // Platform performance: the Short.io domain-statistics endpoint reports
+  // per-referrer TOTAL clicks (bot+human) only — there is no per-referrer
+  // human-click figure — so these cards show TOTAL clicks by platform,
+  // sourced from the by_referrer breakdown rows.
+  const referrerRows = clicks.filter((c) => c.link_id === 'by_referrer')
+  const clicksByReferrer = referrerRows.reduce<Record<string, number>>((acc, c) => {
+    if (!c.referrer) return acc
+    acc[c.referrer] = (acc[c.referrer] ?? 0) + (c.total_clicks ?? 0)
+    return acc
+  }, {})
+  const platforms: PlatformRow[] = Object.entries(PLATFORM_STYLE_BY_REFERRER).map(
+    ([referrer, style]) => ({
+      platform: style.platform,
+      clicks: clicksByReferrer[referrer] ?? 0,
+      referrer,
+      colorFrom: style.colorFrom,
+      colorTo: style.colorTo,
+      textColor: style.textColor,
     })
-    .sort((a, b) => b.totalClicks - a.totalClicks)
-    .slice(0, 10)
+  )
 
-  // Geographic breakdown: group by country.
-  const clicksByCountry = clicks.reduce<Record<string, number>>((acc, c) => {
-    if (!c.country) return acc
+  // Geographic breakdown: per-country TOTAL clicks from the by_country rows.
+  const countryRows = clicks.filter((c) => c.link_id === 'by_country')
+  const clicksByCountry = countryRows.reduce<Record<string, number>>((acc, c) => {
+    if (!c.country || c.country === 'ALL') return acc
     acc[c.country] = (acc[c.country] ?? 0) + (c.total_clicks ?? 0)
     return acc
   }, {})
@@ -319,9 +295,10 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
     .slice(0, 8)
     .map(([label, value]) => ({ label, value }))
 
-  // Device split: group by OS.
-  const clicksByOs = clicks.reduce<Record<string, number>>((acc, c) => {
-    if (!c.os) return acc
+  // Device split: per-OS TOTAL clicks from the by_os rows.
+  const osRows = clicks.filter((c) => c.link_id === 'by_os')
+  const clicksByOs = osRows.reduce<Record<string, number>>((acc, c) => {
+    if (!c.os || c.os === 'ALL') return acc
     acc[c.os] = (acc[c.os] ?? 0) + (c.total_clicks ?? 0)
     return acc
   }, {})
@@ -330,15 +307,21 @@ async function getSocialData(searchParams?: { range?: string }): Promise<SocialD
     .sort((a, b) => b[1] - a[1])
     .map(([name, value], index) => ({ name, value, color: deviceColors[index % deviceColors.length] }))
 
+  // Top links: the domain-statistics endpoint does not expose per-link click
+  // stats, so there is no sourced per-link breakdown at this grain. Present an
+  // explicit empty state rather than aggregate pseudo-rows or mock links.
+  const topLinks: TopLinkRow[] = []
+
   return {
-    totalClicks: totalClicks > 0 ? totalClicks : MOCK_SOCIAL_DATA.totalClicks,
-    humanClicks: totalClicks > 0 ? humanClicks : MOCK_SOCIAL_DATA.humanClicks,
-    botClicks: totalClicks > 0 ? totalClicks - humanClicks : MOCK_SOCIAL_DATA.botClicks,
-    platforms: platforms.some((p) => p.humanClicks > 0) ? platforms : MOCK_SOCIAL_DATA.platforms,
+    totalClicks,
+    humanClicks,
+    botClicks,
+    platforms,
     clickTrend: clickTrend.length > 0 ? clickTrend : MOCK_SOCIAL_DATA.clickTrend,
-    topLinks: topLinks.length > 0 ? topLinks : MOCK_SOCIAL_DATA.topLinks,
-    topCountries: topCountries.length > 0 ? topCountries : MOCK_SOCIAL_DATA.topCountries,
-    deviceSplit: deviceSplit.length > 0 ? deviceSplit : MOCK_SOCIAL_DATA.deviceSplit,
+    topLinks,
+    topCountries,
+    deviceSplit,
+    isSourced: true,
   }
 }
 
@@ -359,8 +342,11 @@ export default async function SocialPage({
 }) {
   const data = await getSocialData(searchParams)
 
-  const humanClickRate = (data.humanClicks / data.totalClicks) * 100
-  const topPlatform = [...data.platforms].sort((a, b) => b.humanClicks - a.humanClicks)[0]
+  const humanClickRate = data.totalClicks > 0 ? (data.humanClicks / data.totalClicks) * 100 : 0
+  const totalPlatformClicks = data.platforms.reduce((sum, p) => sum + p.clicks, 0) || 1
+  const topPlatform =
+    [...data.platforms].sort((a, b) => b.clicks - a.clicks)[0] ??
+    { platform: '—', clicks: 0, referrer: '', colorFrom: '', colorTo: '', textColor: '' }
 
   const humanVsBotData: DonutChartDataPoint[] = [
     { name: 'Human', value: data.humanClicks, color: '#01A6FA' },
@@ -380,6 +366,18 @@ export default async function SocialPage({
   return (
     <div>
       <Header title="Social Media & Campaigns" />
+
+      {/* Sourced-vs-sample data state — mock is never presented as live */}
+      {!data.isSourced && (
+        <div className="mb-6 rounded-lg border border-amber-300 bg-amber-50 p-4">
+          <p className="text-sm font-semibold text-amber-800">Showing sample data</p>
+          <p className="mt-1 text-xs text-amber-700">
+            Live Short.io metrics are unavailable for this period &mdash; no daily click facts
+            have synced yet. The figures below are representative sample values, not sourced
+            analytics. Run a Short.io sync to populate live data.
+          </p>
+        </div>
+      )}
 
       {/* KPI cards row — pass iconName strings, not components */}
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -414,7 +412,7 @@ export default async function SocialPage({
         <h3 className="mb-4 text-base font-semibold text-mrhb-dark">Platform Performance</h3>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {data.platforms.map((platform) => {
-            const sharePct = (platform.humanClicks / data.humanClicks) * 100
+            const sharePct = (platform.clicks / totalPlatformClicks) * 100
             return (
               <div key={platform.platform} className="rounded-xl bg-mrhb-white p-5 shadow-sm">
                 <div className="flex items-center justify-between">
@@ -424,15 +422,15 @@ export default async function SocialPage({
                     {platform.platform.slice(0, 1)}
                   </div>
                   <span className="rounded-full bg-mrhb-cream px-2 py-1 text-xs font-medium text-mrhb-dark/60">
-                    {sharePct.toFixed(1)}% of human clicks
+                    {sharePct.toFixed(1)}% of platform clicks
                   </span>
                 </div>
                 <p className="mt-4 text-sm font-medium text-mrhb-dark/60">{platform.platform}</p>
                 <p className={`mt-1 text-2xl font-semibold ${platform.textColor}`}>
-                  {formatNumber(platform.humanClicks)}
+                  {formatNumber(platform.clicks)}
                 </p>
                 <p className="mt-1 text-xs text-mrhb-dark/50">
-                  human clicks &middot; referrer: {platform.referrer}
+                  clicks &middot; referrer: {platform.referrer}
                 </p>
               </div>
             )
@@ -469,7 +467,7 @@ export default async function SocialPage({
           columns={topLinkColumns}
           data={topLinkRows}
           title="Top Performing Links"
-          emptyMessage="No link data available for this period."
+          emptyMessage="Per-link click breakdown isn't available from Short.io domain statistics."
         />
       </div>
 
