@@ -50,7 +50,7 @@ const CATEGORY_OPTIONS: { value: EventCategory; label: string }[] = [
 const FUNNEL_STAGE_OPTIONS: { value: string; order: number }[] = [
   { value: '', order: 0 },
   { value: 'App Installs', order: 3 },
-  { value: '1st Transaction', order: 4 },
+  { value: 'Transaction', order: 4 },
 ]
 
 type SourceId = 'ga4' | 'gsc' | 'play' | 'shortio' | 'clarity'
