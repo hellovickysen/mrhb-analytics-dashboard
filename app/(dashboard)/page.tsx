@@ -1,26 +1,46 @@
 import Header from '@/components/layout/Header'
 import KPICard from '@/components/cards/KPICard'
 import LineChart, { type LineChartDataPoint } from '@/components/charts/LineChart'
-import { formatNumber, formatPercent } from '@/lib/utils/format'
+import { formatNumber } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
-import { fetchGA4AppActiveUsers } from '@/lib/api-clients/google-analytics'
+import { fetchGA4AppActiveUsersTotal } from '@/lib/api-clients/ga4-app-active-total'
 
 // ---------------------------------------------------------------------------
 // Data fetching
 // ---------------------------------------------------------------------------
-// Server Component — pulls aggregated KPI rows straight from Supabase. Every
-// query below is wrapped so that a missing table, an RLS-denied read, or a
-// genuinely empty result all fall through to the same MOCK_OVERVIEW fallback,
-// which keeps the shape identical to what the UI below expects.
+// Server Component. The Overview aggregates the SAME authoritative sources the
+// per-section pages use, so its KPIs reconcile with them exactly:
+//
+//   Total Users / Traffic Trend / Channel  -> daily_kpis traffic_* rows
+//        (de-duplicated, website-only; matches the Traffic page). We do NOT
+//        sum ga_traffic here — that table is polluted with historical app rows
+//        and GA4 users are non-additive.
+//   Organic Clicks  -> SUM(gsc_pages.clicks), paginated + date-bounded
+//        (matches the SEO page). NOT gsc_queries, whose query dimension is
+//        heavily anonymized and under-counts ~6x.
+//   Social Clicks   -> the authoritative range_<range> Short.io snapshot
+//        (matches the Social page). NOT a raw SUM over shortio_clicks, which
+//        would add every grain (daily + breakdown + snapshot) together.
+//   Wallet Active Users -> fetchGA4AppActiveUsersTotal (one de-duplicated GA4
+//        app call), NOT a sum of daily activeUsers (non-additive -> overcount).
+//   Revenue -> intentionally NOT configured until Firebase revenue events
+//        exist; shown as "Not configured", never a live/$0 figure.
+//   App Installs -> SUM(ga_events first_open); event counts ARE additive. This
+//        is a first-open (install proxy), not a Play-Store-verified install.
+//
+// Every source is wrapped so a missing table / RLS-denied read / empty result
+// falls back to clearly-flagged sample values (never presented as live).
 
 interface OverviewKPIs {
-  totalUsers: { value: number; change: number }
-  walletActiveUsers: { value: number; change: number }
-  appInstalls: { value: number; change: number }
-  organicClicks: { value: number; change: number }
-  socialClicksHuman: { value: number; change: number }
-  revenue: { value: number; change: number }
+  totalUsers: { value: number; change: number | null }
+  walletActiveUsers: { value: number; change: number | null; sourced: boolean }
+  appInstalls: { value: number; change: number | null }
+  organicClicks: { value: number; change: number | null }
+  socialClicksHuman: { value: number; sourced: boolean }
+  revenueConfigured: boolean
+  revenue: { value: number; change: number | null }
+  trafficSourced: boolean
   trafficTrend: LineChartDataPoint[]
   channelBreakdown: { channel: string; sessions: number; share: number }[]
   topCountries: { country: string; users: number; share: number }[]
@@ -30,9 +50,11 @@ const MOCK_OVERVIEW: OverviewKPIs = {
   totalUsers: { value: 48210, change: 8.4 },
   appInstalls: { value: 6320, change: 12.1 },
   organicClicks: { value: 21875, change: 5.6 },
-  socialClicksHuman: { value: 9142, change: -3.2 },
-  walletActiveUsers: { value: 1250, change: 5.2 },
-  revenue: { value: 184500, change: 14.7 },
+  socialClicksHuman: { value: 9142, sourced: false },
+  walletActiveUsers: { value: 1250, change: 5.2, sourced: false },
+  revenueConfigured: false,
+  revenue: { value: 0, change: null },
+  trafficSourced: false,
   trafficTrend: [
     { date: 'Jun 24', value: 3200 },
     { date: 'Jun 27', value: 3450 },
@@ -62,31 +84,42 @@ const MOCK_OVERVIEW: OverviewKPIs = {
   ],
 }
 
-/** Percent change of `current` vs `previous`, guarding divide-by-zero. */
-function pctChange(current: number, previous: number): number {
-  if (!previous) return current > 0 ? 100 : 0
-  return ((current - previous) / previous) * 100
-}
+/** Delimiter used in daily_kpis channel/source metric_names (see ga4-range-kpis). */
+const SEP = '~~'
 
 /**
- * Sums a single numeric column across rows, split into "current 30 days" vs
- * "previous 30 days" (day 31-60 back), so every KPI can report a % change
- * using one shared helper and one shared 60-day fetch per table.
+ * Percent change of `current` vs `previous`. Returns null (→ no % shown) when
+ * there's no comparable baseline (previous ≤ 0) or the swing is implausibly
+ * large (|Δ| > 500%), instead of a misleading 100% / five-figure number.
  */
+function pctChange(current: number, previous: number): number | null {
+  if (!previous || previous <= 0) return null
+  const pct = ((current - previous) / previous) * 100
+  if (Math.abs(pct) > 500) return null
+  return pct
+}
+
+/** Sums a numeric column split into current [curStart, curEnd] vs previous
+ * [prevStart, curStart). Date-bounded on BOTH ends so no stray future/older
+ * rows leak in. Returns null on error so the caller can fall back. */
 async function fetchWindowedSum(
   supabase: ReturnType<typeof createServiceClient>,
   table: string,
   column: string,
   dateColumn: string,
-  since60d: string,
-  cutoff30d: string,
+  prevStart: string,
+  curStart: string,
+  curEnd: string,
   extraFilter?: (query: any) => any
 ): Promise<{ current: number; previous: number } | null> {
   try {
-    let query = supabase.from(table).select(`${dateColumn}, ${column}`).gte(dateColumn, since60d)
+    let query = supabase
+      .from(table)
+      .select(`${dateColumn}, ${column}`)
+      .gte(dateColumn, prevStart)
+      .lte(dateColumn, curEnd)
     if (extraFilter) query = extraFilter(query)
     const { data, error } = await query
-
     if (error || !data) return null
 
     let current = 0
@@ -95,13 +128,51 @@ async function fetchWindowedSum(
       const rowDate = String(row[dateColumn] ?? '')
       const rawValue = row[column]
       const value = typeof rawValue === 'number' ? rawValue : Number(rawValue) || 0
-      if (rowDate >= cutoff30d) {
-        current += value
-      } else {
-        previous += value
-      }
+      if (rowDate >= curStart) current += value
+      else previous += value
+    }
+    return { current, previous }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Sums gsc_pages.clicks across a date window, paginating past Supabase's
+ * 1,000-row-per-request cap. Mirrors the SEO page so Organic Clicks reconciles
+ * with SEO's Total Clicks. Returns { current, previous } (previous = the window
+ * immediately before curStart) or null on error.
+ */
+async function fetchGscPageClicks(
+  supabase: ReturnType<typeof createServiceClient>,
+  prevStart: string,
+  curStart: string,
+  curEnd: string
+): Promise<{ current: number; previous: number } | null> {
+  try {
+    const rows: { date: string; clicks: number }[] = []
+    const PAGE = 1000
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabase
+        .from('gsc_pages')
+        .select('date, clicks')
+        .gte('date', prevStart)
+        .lte('date', curEnd)
+        .order('date', { ascending: true })
+        .range(from, from + PAGE - 1)
+      if (error) throw new Error(error.message)
+      const page = (data ?? []) as { date: string; clicks: number }[]
+      rows.push(...page)
+      if (page.length < PAGE) break
     }
 
+    let current = 0
+    let previous = 0
+    for (const r of rows) {
+      const v = typeof r.clicks === 'number' ? r.clicks : Number(r.clicks) || 0
+      if (r.date >= curStart) current += v
+      else previous += v
+    }
     return { current, previous }
   } catch {
     return null
@@ -109,141 +180,166 @@ async function fetchWindowedSum(
 }
 
 async function getOverviewData(searchParams?: { range?: string }): Promise<OverviewKPIs> {
+  const rangeKey = (searchParams?.range as string) ?? '30d'
   try {
     const supabase = createServiceClient()
-
-    const { startDate, prevStartDate } = getDateWindow(searchParams)
-    const since60d = prevStartDate
-    const cutoff30d = startDate
-
-    // Fetch active users from GA4 App property directly (not from Supabase)
-    // This gives us the true unique active user count from Firebase
-    const { endDate } = getDateWindow(searchParams)
-    const activeUsersPromise = fetchGA4AppActiveUsers(cutoff30d, endDate)
-    const prevActiveUsersPromise = fetchGA4AppActiveUsers(since60d, cutoff30d)
+    const { startDate, endDate, prevStartDate } = getDateWindow(searchParams)
 
     const [
-      usersWindow,
-      installsWindow,
-      clicksWindow,
-      socialClicksWindow,
-      revenueWindow,
-      trafficTrendResult,
-      channelResult,
-      geoResult,
-      activeUsersData,
-      prevActiveUsersData,
+      usersKpiRes,
+      trendRes,
+      installsWin,
+      socialRes,
+      revenueRes,
+      geoRes,
+      walletCur,
+      walletPrev,
+      gscClicks,
     ] = await Promise.all([
-      fetchWindowedSum(supabase, 'ga_traffic', 'users', 'date', since60d, cutoff30d),
-      fetchWindowedSum(supabase, 'ga_events', 'event_count', 'date', since60d, cutoff30d, (q) =>
+      // Authoritative Total Users (de-duplicated, website-only) — latest sync.
+      supabase
+        .from('daily_kpis')
+        .select('date, metric_value, period_comparison_pct')
+        .eq('source', 'ga4')
+        .eq('metric_name', `traffic_users_${rangeKey}`)
+        .order('date', { ascending: false })
+        .limit(1),
+      // Authoritative per-date session trend within the window.
+      supabase
+        .from('daily_kpis')
+        .select('date, metric_value')
+        .eq('source', 'ga4')
+        .eq('metric_name', 'traffic_trend_sessions')
+        .gte('date', startDate)
+        .lte('date', endDate)
+        .order('date', { ascending: true }),
+      // App installs proxy (first_open) — additive; safe to sum.
+      fetchWindowedSum(supabase, 'ga_events', 'event_count', 'date', prevStartDate, startDate, endDate, (q) =>
         q.eq('event_name', 'first_open')
       ),
-      fetchWindowedSum(supabase, 'gsc_queries', 'clicks', 'date', since60d, cutoff30d),
-      fetchWindowedSum(supabase, 'shortio_clicks', 'human_clicks', 'date', since60d, cutoff30d),
-      fetchWindowedSum(supabase, 'daily_kpis', 'metric_value', 'date', since60d, cutoff30d, (q) =>
-        q.eq('metric_name', 'revenue')
-      ),
+      // Authoritative Short.io per-range human-click total (latest snapshot).
       supabase
-        .from('ga_traffic')
-        .select('date, sessions')
-        .gte('date', cutoff30d)
-        .order('date', { ascending: true }),
-      supabase.from('ga_traffic').select('channel, sessions').gte('date', cutoff30d),
-      supabase.from('ga_geo').select('country, users').gte('date', cutoff30d),
-      activeUsersPromise,
-      prevActiveUsersPromise,
+        .from('shortio_clicks')
+        .select('date, human_clicks, total_clicks')
+        .eq('link_id', `range_${rangeKey}`)
+        .order('date', { ascending: false })
+        .limit(1),
+      // Revenue rows (only present once Firebase revenue events are configured).
+      supabase
+        .from('daily_kpis')
+        .select('metric_value')
+        .eq('source', 'ga4')
+        .eq('metric_name', 'revenue')
+        .gte('date', startDate)
+        .lte('date', endDate),
+      // Top countries — ga_geo is website-only (same basis as the Traffic page).
+      supabase.from('ga_geo').select('country, users').gte('date', startDate).lte('date', endDate),
+      // Wallet active users — de-duplicated period totals (current + previous).
+      fetchGA4AppActiveUsersTotal(startDate, endDate),
+      fetchGA4AppActiveUsersTotal(prevStartDate, startDate),
+      // Organic clicks from gsc_pages (paginated), current + previous windows.
+      fetchGscPageClicks(supabase, prevStartDate, startDate, endDate),
     ])
 
-    // Wallet Active Users — unique active users from GA4 App property.
-    // Sum daily activeUsers for current and previous periods.
-    // Note: summing daily unique users overcounts slightly vs true 30-day
-    // unique users, but GA4's daily activeUsers is the best available metric.
-    const currentActiveSum = activeUsersData.reduce((s, r) => s + r.activeUsers, 0)
-    const prevActiveSum = prevActiveUsersData.reduce((s, r) => s + r.activeUsers, 0)
-    // Use max daily value as a more accurate "unique in period" estimate
-    const currentActiveMax = activeUsersData.length > 0
-      ? Math.max(...activeUsersData.map(r => r.activeUsers))
-      : 0
-    // For the KPI, show total daily active users (engagement volume)
-    const walletActiveUsers = currentActiveSum > 0
-      ? { value: currentActiveSum, change: pctChange(currentActiveSum, prevActiveSum) }
-      : MOCK_OVERVIEW.walletActiveUsers
+    // ---- Total Users (authoritative) ----
+    const usersRow = usersKpiRes.data?.[0] as
+      | { date: string; metric_value: number; period_comparison_pct: number | null }
+      | undefined
+    const trafficSourced = !!usersRow
+    const totalUsers = usersRow
+      ? { value: Number(usersRow.metric_value) || 0, change: usersRow.period_comparison_pct ?? null }
+      : { value: MOCK_OVERVIEW.totalUsers.value, change: MOCK_OVERVIEW.totalUsers.change }
 
-    // Traffic trend: daily session totals for the last 30 days.
+    // ---- Traffic trend (authoritative per-date sessions) ----
     let trafficTrend: LineChartDataPoint[] = MOCK_OVERVIEW.trafficTrend
-    if (!trafficTrendResult.error && trafficTrendResult.data && trafficTrendResult.data.length > 0) {
-      const byDate = new Map<string, number>()
-      for (const row of trafficTrendResult.data as { date: string; sessions: number }[]) {
-        byDate.set(row.date, (byDate.get(row.date) ?? 0) + (row.sessions ?? 0))
-      }
-      trafficTrend = Array.from(byDate.entries())
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([date, value]) => ({ date: formatShortDate(date), value }))
+    const trendRows = (trendRes.data ?? []) as { date: string; metric_value: number }[]
+    if (trendRows.length > 0) {
+      trafficTrend = trendRows.map((r) => ({
+        date: formatShortDate(r.date),
+        value: Number(r.metric_value) || 0,
+      }))
     }
 
-    // Channel breakdown: sessions grouped by channel, top 5 by volume.
+    // ---- Channel breakdown (authoritative) — read the latest sync day's rows
+    // and parse traffic_chan_<range>~~<channel> in JS (never SQL LIKE: the
+    // metric_name contains underscores that LIKE would treat as wildcards). ----
     let channelBreakdown = MOCK_OVERVIEW.channelBreakdown
-    if (!channelResult.error && channelResult.data && channelResult.data.length > 0) {
-      const byChannel = new Map<string, number>()
-      for (const row of channelResult.data as { channel: string; sessions: number }[]) {
-        byChannel.set(row.channel, (byChannel.get(row.channel) ?? 0) + (row.sessions ?? 0))
+    if (usersRow?.date) {
+      const { data: chanData } = await supabase
+        .from('daily_kpis')
+        .select('metric_name, metric_value')
+        .eq('source', 'ga4')
+        .eq('date', usersRow.date)
+      const prefix = `traffic_chan_${rangeKey}${SEP}`
+      const chanRows = ((chanData ?? []) as { metric_name: string; metric_value: number }[])
+        .filter((r) => typeof r.metric_name === 'string' && r.metric_name.startsWith(prefix))
+        .map((r) => ({ channel: r.metric_name.slice(prefix.length), sessions: Number(r.metric_value) || 0 }))
+      if (chanRows.length > 0) {
+        const total = chanRows.reduce((t, r) => t + r.sessions, 0)
+        channelBreakdown = chanRows
+          .sort((a, b) => b.sessions - a.sessions)
+          .slice(0, 5)
+          .map((r) => ({ channel: r.channel, sessions: r.sessions, share: total > 0 ? (r.sessions / total) * 100 : 0 }))
       }
-      const total = Array.from(byChannel.values()).reduce((t, v) => t + v, 0)
-      channelBreakdown = Array.from(byChannel.entries())
-        .sort(([, a], [, b]) => b - a)
-        .slice(0, 5)
-        .map(([channel, sessions]) => ({
-          channel,
-          sessions,
-          share: total > 0 ? (sessions / total) * 100 : 0,
-        }))
     }
 
-    // Top countries: users grouped by country, top 5 by volume.
+    // ---- App installs (first_open proxy) ----
+    const appInstalls = installsWin
+      ? { value: installsWin.current, change: pctChange(installsWin.current, installsWin.previous) }
+      : { value: MOCK_OVERVIEW.appInstalls.value, change: MOCK_OVERVIEW.appInstalls.change }
+
+    // ---- Organic clicks (gsc_pages, matches SEO) ----
+    const organicClicks = gscClicks
+      ? { value: gscClicks.current, change: pctChange(gscClicks.current, gscClicks.previous) }
+      : { value: MOCK_OVERVIEW.organicClicks.value, change: MOCK_OVERVIEW.organicClicks.change }
+
+    // ---- Social clicks (authoritative Short.io range snapshot) ----
+    const socialRow = socialRes.data?.[0] as { human_clicks: number } | undefined
+    const socialClicksHuman = socialRow
+      ? { value: Number(socialRow.human_clicks) || 0, sourced: true }
+      : { value: MOCK_OVERVIEW.socialClicksHuman.value, sourced: false }
+
+    // ---- Wallet active users (de-duplicated period total) ----
+    const walletSourced = walletCur > 0
+    const walletActiveUsers = walletSourced
+      ? { value: walletCur, change: pctChange(walletCur, walletPrev), sourced: true }
+      : { value: MOCK_OVERVIEW.walletActiveUsers.value, change: MOCK_OVERVIEW.walletActiveUsers.change, sourced: false }
+
+    // ---- Revenue (only when Firebase revenue events are configured) ----
+    const revenueRows = (revenueRes.data ?? []) as { metric_value: number }[]
+    const revenueConfigured = revenueRows.length > 0
+    const revenueValue = revenueRows.reduce((t, r) => t + (Number(r.metric_value) || 0), 0)
+    const revenue = { value: revenueValue, change: null }
+
+    // ---- Top countries (ga_geo) ----
     let topCountries = MOCK_OVERVIEW.topCountries
-    if (!geoResult.error && geoResult.data && geoResult.data.length > 0) {
+    const geoRows = (geoRes.data ?? []) as { country: string; users: number }[]
+    if (geoRows.length > 0) {
       const byCountry = new Map<string, number>()
-      for (const row of geoResult.data as { country: string; users: number }[]) {
-        byCountry.set(row.country, (byCountry.get(row.country) ?? 0) + (row.users ?? 0))
+      for (const row of geoRows) {
+        byCountry.set(row.country, (byCountry.get(row.country) ?? 0) + (Number(row.users) || 0))
       }
       const total = Array.from(byCountry.values()).reduce((t, v) => t + v, 0)
       topCountries = Array.from(byCountry.entries())
         .sort(([, a], [, b]) => b - a)
         .slice(0, 5)
-        .map(([country, users]) => ({
-          country,
-          users,
-          share: total > 0 ? (users / total) * 100 : 0,
-        }))
+        .map(([country, users]) => ({ country, users, share: total > 0 ? (users / total) * 100 : 0 }))
     }
 
     return {
-      totalUsers: usersWindow
-        ? { value: usersWindow.current, change: pctChange(usersWindow.current, usersWindow.previous) }
-        : MOCK_OVERVIEW.totalUsers,
-      appInstalls: installsWindow
-        ? { value: installsWindow.current, change: pctChange(installsWindow.current, installsWindow.previous) }
-        : MOCK_OVERVIEW.appInstalls,
-      organicClicks: clicksWindow
-        ? { value: clicksWindow.current, change: pctChange(clicksWindow.current, clicksWindow.previous) }
-        : MOCK_OVERVIEW.organicClicks,
-      socialClicksHuman: socialClicksWindow
-        ? {
-            value: socialClicksWindow.current,
-            change: pctChange(socialClicksWindow.current, socialClicksWindow.previous),
-          }
-        : MOCK_OVERVIEW.socialClicksHuman,
+      totalUsers,
       walletActiveUsers,
-      revenue: revenueWindow
-        ? { value: revenueWindow.current, change: pctChange(revenueWindow.current, revenueWindow.previous) }
-        : MOCK_OVERVIEW.revenue,
+      appInstalls,
+      organicClicks,
+      socialClicksHuman,
+      revenueConfigured,
+      revenue,
+      trafficSourced,
       trafficTrend,
       channelBreakdown,
       topCountries,
     }
   } catch {
-    // Network failure, missing env vars, or any other unexpected error —
-    // the UI must always render, so fall all the way back to mock data.
     return MOCK_OVERVIEW
   }
 }
@@ -255,7 +351,8 @@ function formatShortDate(dateStr: string): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit', timeZone: 'UTC' })
 }
 
-function getTrend(change: number): 'up' | 'down' | 'flat' {
+function getTrend(change: number | null | undefined): 'up' | 'down' | 'flat' {
+  if (!change) return 'flat'
   if (change > 0) return 'up'
   if (change < 0) return 'down'
   return 'flat'
@@ -268,59 +365,80 @@ export default async function OverviewPage({
 }) {
   const data = await getOverviewData(searchParams)
 
+  // Collect any KPI that is NOT live so it's never silently shown as sourced.
+  const notLive: string[] = []
+  if (!data.revenueConfigured) notLive.push('Revenue is not configured (needs Firebase purchase/revenue events)')
+  if (!data.walletActiveUsers.sourced) notLive.push('Wallet Active Users is sample data (GA4 app metrics unavailable)')
+  if (!data.socialClicksHuman.sourced) notLive.push('Social Clicks is sample data (Short.io not synced yet)')
+  if (!data.trafficSourced) notLive.push('Total Users, Traffic Trend and Channel Breakdown are sample data (GA4 traffic KPIs not synced yet)')
+
   return (
     <div>
       <Header title="Overview" />
+
+      {/* Any non-live KPIs are called out explicitly — mock is never presented as live */}
+      {notLive.length > 0 && (
+        <div className="mb-6 rounded-lg border border-amber-300 bg-amber-50 p-4">
+          <p className="text-sm font-semibold text-amber-800">Some cards are not live data</p>
+          <ul className="mt-1 list-disc pl-5 text-xs text-amber-700">
+            {notLive.map((msg) => (
+              <li key={msg}>{msg}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* KPI cards row — pass iconName strings, not components */}
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <KPICard
           title="Total Users"
           value={formatNumber(data.totalUsers.value)}
-          change={data.totalUsers.change}
+          change={data.totalUsers.change ?? undefined}
           trend={getTrend(data.totalUsers.change)}
           iconName="users"
-          tooltip="Total number of people who visited your website in this period"
+          tooltip="Website users for this period — de-duplicated active users (matches the Traffic page)"
         />
         <KPICard
           title="App Installs"
           value={formatNumber(data.appInstalls.value)}
-          change={data.appInstalls.change}
+          change={data.appInstalls.change ?? undefined}
           trend={getTrend(data.appInstalls.change)}
           iconName="smartphone"
-          tooltip="Number of times Sahal Wallet was installed from the Play Store"
+          tooltip="First-time app opens (Firebase first_open) — a proxy for installs, not a Play-Store-verified install count"
         />
         <KPICard
           title="Organic Clicks"
           value={formatNumber(data.organicClicks.value)}
-          change={data.organicClicks.change}
+          change={data.organicClicks.change ?? undefined}
           trend={getTrend(data.organicClicks.change)}
           iconName="mouse-pointer-click"
-          tooltip="Clicks from Google search results to your website"
+          tooltip="Clicks from Google search results to your website (from Search Console page data — matches the SEO page)"
         />
         <KPICard
           title="Social Clicks (Human)"
           value={formatNumber(data.socialClicksHuman.value)}
-          change={data.socialClicksHuman.change}
-          trend={getTrend(data.socialClicksHuman.change)}
           iconName="share2"
-          tooltip="Real people (not bots) who clicked your Short.io social media links"
+          tooltip="Real people (not bots) who clicked your Short.io links — authoritative per-range total (matches the Social page)"
         />
         <KPICard
           title="Wallet Active Users"
           value={formatNumber(data.walletActiveUsers.value)}
-          change={data.walletActiveUsers.change}
+          change={data.walletActiveUsers.change ?? undefined}
           trend={getTrend(data.walletActiveUsers.change)}
           iconName="users"
-          tooltip="Total daily active users in Sahal Wallet app (from Firebase GA4)"
+          tooltip="Unique active users in the Sahal Wallet app for this period (de-duplicated, from Firebase GA4)"
         />
         <KPICard
           title="Revenue"
-          value={`$${formatNumber(data.revenue.value)}`}
-          change={data.revenue.change}
-          trend={getTrend(data.revenue.change)}
+          value={data.revenueConfigured ? `$${formatNumber(data.revenue.value)}` : 'Not configured'}
+          change={data.revenueConfigured ? data.revenue.change ?? undefined : undefined}
+          trend={getTrend(data.revenueConfigured ? data.revenue.change : null)}
           iconName="dollar-sign"
-          tooltip="Total revenue generated from in-app transactions"
+          tooltip={
+            data.revenueConfigured
+              ? 'Total revenue generated from in-app transactions'
+              : 'Revenue tracking is not configured yet — it requires Firebase purchase/revenue events. This is not live data, and transaction event counts are not shown as revenue.'
+          }
         />
       </div>
 
