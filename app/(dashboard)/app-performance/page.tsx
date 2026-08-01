@@ -6,44 +6,31 @@ import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
+import { fetchGA4AppActiveUsersTotal } from '@/lib/api-clients/ga4-app-active-total'
 
 // ---------------------------------------------------------------------------
-// Data fetching
+// App Performance (Sahal Wallet) — reworked for correctness.
+//
+// PRIMARY SOURCE: the Firebase-linked GA4 app property via `ga_events`
+// (paginated — the 30/90-day windows exceed Supabase's 1,000-row cap).
+// Event names are matched ACROSS PLATFORMS (SA_/SI_/SW_ screens and
+// EA_/EI_/EW_ actions), because onboarding/transaction events are largely
+// EA_/EI_ (Android/iOS), not EW_ (web).
+//
+// STORE SOURCE: `play_installs` holds the Play Store listing's CUMULATIVE
+// install badge (e.g. 100,000+) snapshotted every day — it is NOT daily new
+// installs, so we use the LATEST snapshot (never a sum). `play_ratings` holds
+// the combined Play rating (avg + review count); its per-star breakdown isn't
+// provided by the listing (all zeros). App Store is not connected (needs App
+// Store Connect / the RU storefront), so it renders "Not connected" rather
+// than duplicating Play's numbers.
+//
+// Anything not sourced is surfaced in a banner and never presented as live.
 // ---------------------------------------------------------------------------
-// This is a Server Component. Historically this page queried Play Console
-// API-backed tables directly (`play_installs`, `play_store_listing`) for
-// install/funnel numbers. The Play Developer Reporting API those tables
-// depend on requires per-app enablement and only backfills a rolling
-// ~30-60 day window (see lib/api-clients/play-console.ts), so it's an
-// unreliable primary source. This version instead treats Sahal Wallet's
-// Firebase-linked GA4 property (`ga_events`, synced via
-// fetchGA4AppEvents -> ga_events) as the primary source for installs,
-// active users, onboarding, and feature-usage metrics, and only reaches
-// into `play_installs` / `play_ratings` for the numbers GA4 doesn't carry
-// (store-reported install counts and star ratings) — those two tables are
-// expected to be populated by a Play Store / App Store *scraper* going
-// forward rather than the Play Console API, but this query layer doesn't
-// care which sync method wrote them as long as the column shapes match the
-// existing schema (see supabase/migrations/001_initial_schema.sql).
-//
-// Firebase/GA4 event names this page depends on (Sahal Wallet app):
-//   first_open                    - first app open on a device (install proxy)
-//   session_start                 - app session start (active-usage proxy)
-//   SA_GET_STARTED                - "Get Started" screen shown post-open
-//   SA_APP_DASHBOARD              - user reached the main app dashboard
-//   EW_ONBOARDING_GUIDE_COMPLETE  - user completed the onboarding guide
-//   EA_SEND_%                     - send/transfer transaction events (wildcard prefix)
-//   EA_T_%                        - tile click events, e.g. EA_T_AppScreen,
-//                                    EA_T_PersonalizeWallet, EA_T_MIROStaking,
-//                                    EA_T_MRHBStore
-//
-// Every section below is independently guarded and falls back to its slice
-// of MOCK_APP_PERFORMANCE_DATA when the real query returns no usable rows —
-// keeps the page renderable well before every event name here has synced.
 
 interface KPIMetric {
   value: number
-  change: number
+  change: number | null
 }
 
 interface FunnelStep {
@@ -60,6 +47,7 @@ interface StoreRating {
   store: string
   avgRating: number
   reviewsCount: number
+  connected: boolean
 }
 
 interface FeatureUsageRow {
@@ -76,103 +64,24 @@ interface RecentActivityRow {
 
 interface AppPerformanceData {
   totalInstalls: KPIMetric
+  installsLifetime: boolean
+  installsSourced: boolean
   activeUsers: KPIMetric
+  activeUsersSourced: boolean
   avgRating: KPIMetric
+  ratingsSourced: boolean
   onboardingRate: KPIMetric
   transactionRate: KPIMetric
   usageTrend: AreaChartDataPoint[]
   onboardingFunnel: FunnelStep[]
   ratingDistribution: RatingBucket[]
+  starBreakdownAvailable: boolean
   storeRatings: StoreRating[]
   featureUsage: FeatureUsageRow[]
   recentActivity: RecentActivityRow[]
+  hasEvents: boolean
 }
 
-const MOCK_APP_PERFORMANCE_DATA: AppPerformanceData = {
-  totalInstalls: { value: 6320, change: 12.1 },
-  activeUsers: { value: 4180, change: 6.8 },
-  avgRating: { value: 4.2, change: 2.4 },
-  onboardingRate: { value: 68.4, change: 3.1 },
-  transactionRate: { value: 41.2, change: 5.6 },
-
-  // 30-day daily first_open (new installs) vs. session_start (active users)
-  usageTrend: [
-    { date: 'Jun 24', value: 168, secondaryValue: 720 },
-    { date: 'Jun 25', value: 172, secondaryValue: 745 },
-    { date: 'Jun 26', value: 159, secondaryValue: 702 },
-    { date: 'Jun 27', value: 181, secondaryValue: 768 },
-    { date: 'Jun 28', value: 195, secondaryValue: 812 },
-    { date: 'Jun 29', value: 203, secondaryValue: 840 },
-    { date: 'Jun 30', value: 188, secondaryValue: 790 },
-    { date: 'Jul 01', value: 176, secondaryValue: 755 },
-    { date: 'Jul 02', value: 190, secondaryValue: 803 },
-    { date: 'Jul 03', value: 212, secondaryValue: 865 },
-    { date: 'Jul 04', value: 224, secondaryValue: 902 },
-    { date: 'Jul 05', value: 208, secondaryValue: 850 },
-    { date: 'Jul 06', value: 199, secondaryValue: 820 },
-    { date: 'Jul 07', value: 215, secondaryValue: 878 },
-    { date: 'Jul 08', value: 231, secondaryValue: 930 },
-    { date: 'Jul 09', value: 219, secondaryValue: 895 },
-    { date: 'Jul 10', value: 206, secondaryValue: 845 },
-    { date: 'Jul 11', value: 228, secondaryValue: 912 },
-    { date: 'Jul 12', value: 241, secondaryValue: 958 },
-    { date: 'Jul 13', value: 235, secondaryValue: 940 },
-    { date: 'Jul 14', value: 222, secondaryValue: 900 },
-    { date: 'Jul 15', value: 244, secondaryValue: 968 },
-    { date: 'Jul 16', value: 256, secondaryValue: 1010 },
-    { date: 'Jul 17', value: 248, secondaryValue: 985 },
-    { date: 'Jul 18', value: 233, secondaryValue: 935 },
-    { date: 'Jul 19', value: 251, secondaryValue: 995 },
-    { date: 'Jul 20', value: 267, secondaryValue: 1052 },
-    { date: 'Jul 21', value: 259, secondaryValue: 1025 },
-    { date: 'Jul 22', value: 242, secondaryValue: 965 },
-    { date: 'Jul 23', value: 263, secondaryValue: 1040 },
-  ],
-
-  // Onboarding funnel: first_open -> Get Started -> Dashboard -> Onboarding complete
-  onboardingFunnel: [
-    { label: 'App Opened', value: 6320 },
-    { label: 'Get Started', value: 5410 },
-    { label: 'Reached Dashboard', value: 4760 },
-    { label: 'Onboarding Complete', value: 4323 },
-  ],
-
-  ratingDistribution: [
-    { label: '5 star', value: 0 },
-    { label: '4 star', value: 0 },
-    { label: '3 star', value: 0 },
-    { label: '2 star', value: 0 },
-    { label: '1 star', value: 0 },
-  ],
-
-  storeRatings: [
-    { store: 'Google Play', avgRating: 4.2, reviewsCount: 5000 },
-    { store: 'App Store', avgRating: 4.4, reviewsCount: 1210 },
-  ],
-
-  featureUsage: [
-    { feature: 'App Screen', eventName: 'EA_T_AppScreen', clicks: 8420 },
-    { feature: 'Personalize Wallet', eventName: 'EA_T_PersonalizeWallet', clicks: 3110 },
-    { feature: 'MIRO Staking', eventName: 'EA_T_MIROStaking', clicks: 2260 },
-    { feature: 'MRHB Store', eventName: 'EA_T_MRHBStore', clicks: 1485 },
-  ],
-
-  recentActivity: [
-    { eventName: 'session_start', eventCount: 4180, users: 3920 },
-    { eventName: 'first_open', eventCount: 263, users: 263 },
-    { eventName: 'SA_APP_DASHBOARD', eventCount: 3640, users: 3410 },
-    { eventName: 'EA_T_AppScreen', eventCount: 1120, users: 980 },
-    { eventName: 'EW_ONBOARDING_GUIDE_COMPLETE', eventCount: 214, users: 214 },
-    { eventName: 'EA_SEND_TOKEN', eventCount: 186, users: 172 },
-    { eventName: 'SA_GET_STARTED', eventCount: 301, users: 301 },
-    { eventName: 'EA_T_PersonalizeWallet', eventCount: 158, users: 140 },
-  ],
-}
-
-// TilesType parsed from an `EA_T_<TilesType>` event name -> human-readable
-// feature label. Falls back to a title-cased version of the raw suffix for
-// any tile type not explicitly mapped here (keeps the chart useful even if
-// the app adds new tiles before this map is updated).
 const TILE_FEATURE_LABELS: Record<string, string> = {
   AppScreen: 'App Screen',
   PersonalizeWallet: 'Personalize Wallet',
@@ -186,266 +95,245 @@ function formatTrendDate(dateStr: string): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit', timeZone: 'UTC' })
 }
 
-/** Splits a camel/PascalCase tile-type suffix into spaced words, e.g. "MIROStaking" -> "MIRO Staking". */
 function titleCaseTileType(raw: string): string {
   const spaced = raw.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
   return spaced.length > 0 ? spaced : raw
 }
 
 function tileFeatureLabel(eventName: string): string {
-  const suffix = eventName.replace(/^EA_T_/, '')
+  const suffix = eventName.replace(/^E[AIW]_T_/, '')
   return TILE_FEATURE_LABELS[suffix] ?? titleCaseTileType(suffix)
 }
 
-/** Percent change of `current` vs `previous`, guarding divide-by-zero. */
-function pctChange(current: number, previous: number): number {
-  if (!previous) return current > 0 ? 100 : 0
-  return ((current - previous) / previous) * 100
+/** Percent change of current vs previous. Returns null when there's no usable
+ * baseline or the swing is implausibly large, instead of a misleading number. */
+function pctChange(current: number, previous: number): number | null {
+  if (!previous || previous <= 0) return null
+  const pct = ((current - previous) / previous) * 100
+  if (Math.abs(pct) > 500) return null
+  return pct
 }
+
+type EventRow = { date: string; event_name: string; event_count: number; users: number }
+
+async function fetchEvents(
+  supabase: ReturnType<typeof createServiceClient>,
+  gte: string,
+  bound: { lte?: string; lt?: string }
+): Promise<EventRow[]> {
+  const all: EventRow[] = []
+  const PAGE = 1000
+  for (let p = 0; p < 40; p++) {
+    let q = supabase.from('ga_events').select('date, event_name, event_count, users').gte('date', gte)
+    if (bound.lte) q = q.lte('date', bound.lte)
+    if (bound.lt) q = q.lt('date', bound.lt)
+    q = q.order('date', { ascending: true }).range(p * PAGE, p * PAGE + PAGE - 1)
+    const { data, error } = await q
+    if (error) throw new Error(error.message)
+    const rows = (data ?? []) as EventRow[]
+    all.push(...rows)
+    if (rows.length < PAGE) break
+  }
+  return all
+}
+
+const U = (r: EventRow): string => String(r.event_name ?? '').toUpperCase()
+const cnt = (rows: EventRow[], pred: (n: string) => boolean): number =>
+  rows.filter((r) => pred(U(r))).reduce((s, r) => s + (Number(r.event_count) || 0), 0)
+const usr = (rows: EventRow[], pred: (n: string) => boolean): number =>
+  rows.filter((r) => pred(U(r))).reduce((s, r) => s + (Number(r.users) || 0), 0)
+
+const isTx = (n: string): boolean =>
+  n.includes('SEND_MONEY') || n.includes('_SEND_') || n.includes('SWAP') || n.includes('SAHAL_RAMP')
 
 async function getAppPerformanceData(searchParams?: { range?: string }): Promise<AppPerformanceData> {
   const supabase = createServiceClient()
-  const { startDate: since, prevStartDate } = getDateWindow(searchParams)
+  const { startDate: since, endDate: until, prevStartDate } = getDateWindow(searchParams)
 
-  const [eventsRes, prevEventsRes, installsRes, ratingsRes] = await Promise.all([
-    // Current window: every ga_events row we need, sliced client-side below.
-    supabase
-      .from('ga_events')
-      .select('date, event_name, event_count, users')
-      .gte('date', since),
-    // Prior comparable window, for KPI period-over-period change.
-    supabase
-      .from('ga_events')
-      .select('date, event_name, event_count, users')
-      .gte('date', prevStartDate)
-      .lt('date', since),
-    // Store-reported installs (Play Store + App Store scraper, or legacy
-    // Play Console sync — same table, either source). Kept as a fallback/
-    // supplement to the first_open-based install count.
-    supabase
-      .from('play_installs')
-      .select('date, installs, uninstalls, active_devices, country')
-      .gte('date', since)
-      .order('date', { ascending: true }),
-    // Latest combined Play Store / App Store rating snapshot.
-    supabase
-      .from('play_ratings')
-      .select('date, avg_rating, total_ratings, star_1, star_2, star_3, star_4, star_5, reviews_count')
-      .order('date', { ascending: false })
-      .limit(2),
-  ])
-
-  const events = eventsRes.data ?? []
-  const prevEvents = prevEventsRes.data ?? []
-  const installs = installsRes.data ?? []
-  const ratings = ratingsRes.data ?? []
-
-  const hasEvents = !eventsRes.error && events.length > 0
-
-  if (!hasEvents) {
-    return MOCK_APP_PERFORMANCE_DATA
+  const mockEmpty: AppPerformanceData = {
+    totalInstalls: { value: 0, change: null },
+    installsLifetime: false,
+    installsSourced: false,
+    activeUsers: { value: 0, change: null },
+    activeUsersSourced: false,
+    avgRating: { value: 0, change: null },
+    ratingsSourced: false,
+    onboardingRate: { value: 0, change: null },
+    transactionRate: { value: 0, change: null },
+    usageTrend: [],
+    onboardingFunnel: [],
+    ratingDistribution: [],
+    starBreakdownAvailable: false,
+    storeRatings: [],
+    featureUsage: [],
+    recentActivity: [],
+    hasEvents: false,
   }
 
-  // ---- Helpers over the fetched ga_events rows -----------------------------
+  try {
+    const [events, prevEvents, installsRes, ratingsRes, activeCur, activePrev] = await Promise.all([
+      fetchEvents(supabase, since, { lte: until }),
+      fetchEvents(supabase, prevStartDate, { lt: since }),
+      supabase.from('play_installs').select('date, installs, country').order('date', { ascending: false }).limit(180),
+      supabase
+        .from('play_ratings')
+        .select('date, avg_rating, total_ratings, star_1, star_2, star_3, star_4, star_5, reviews_count')
+        .order('date', { ascending: false })
+        .limit(5),
+      fetchGA4AppActiveUsersTotal(since, until),
+      fetchGA4AppActiveUsersTotal(prevStartDate, since),
+    ])
 
-  type EventRow = { date: string; event_name: string; event_count: number; users: number }
+    const hasEvents = events.length > 0
 
-  const sumByEventName = (rows: EventRow[], name: string): number =>
-    rows.filter((r) => r.event_name === name).reduce((sum, r) => sum + (r.event_count ?? 0), 0)
+    // ---- Core event aggregates (all-platform, users-based where it means users) ----
+    const firstOpen = cnt(events, (n) => n === 'FIRST_OPEN')
+    const prevFirstOpen = cnt(prevEvents, (n) => n === 'FIRST_OPEN')
+    const completeUsers = usr(events, (n) => n.includes('ONBOARDING_GUIDE_COMPLETE'))
+    const prevCompleteUsers = usr(prevEvents, (n) => n.includes('ONBOARDING_GUIDE_COMPLETE'))
+    const getStartedUsers = usr(events, (n) => n.includes('GET_STARTED'))
+    const dashboardUsers = usr(events, (n) => n.includes('APP_DASHBOARD'))
+    const prevDashboardUsers = usr(prevEvents, (n) => n.includes('APP_DASHBOARD'))
+    const txUsers = usr(events, isTx)
+    const prevTxUsers = usr(prevEvents, isTx)
 
-  const sumUsersByEventName = (rows: EventRow[], name: string): number =>
-    rows.filter((r) => r.event_name === name).reduce((sum, r) => sum + (r.users ?? 0), 0)
+    // ---- Total Installs: latest store snapshot (lifetime badge), never summed ----
+    const installsRows = (installsRes.data ?? []) as any[]
+    const allRows = installsRows.filter((r) => r.country === 'ALL')
+    const pool = allRows.length > 0 ? allRows : installsRows
+    const latestInstall = pool[0] // ordered desc by date
+    const priorInstall = pool.find((r) => String(r.date) < since)
+    const lifetimeInstalls = latestInstall ? Number(latestInstall.installs) || 0 : 0
+    const installsSourced = !!latestInstall && lifetimeInstalls > 0
+    const totalInstalls: KPIMetric = installsSourced
+      ? { value: lifetimeInstalls, change: priorInstall ? pctChange(lifetimeInstalls, Number(priorInstall.installs) || 0) : null }
+      : { value: firstOpen, change: pctChange(firstOpen, prevFirstOpen) }
+    const installsLifetime = installsSourced
 
-  const sumByPrefix = (rows: EventRow[], prefix: string): number =>
-    rows
-      .filter((r) => r.event_name.startsWith(prefix))
-      .reduce((sum, r) => sum + (r.event_count ?? 0), 0)
+    // ---- Active Users: authoritative de-duplicated GA4 app metric ----
+    const activeUsersSourced = activeCur > 0
+    const sessionUsers = usr(events, (n) => n === 'SESSION_START')
+    const prevSessionUsers = usr(prevEvents, (n) => n === 'SESSION_START')
+    const activeUsers: KPIMetric = activeUsersSourced
+      ? { value: activeCur, change: pctChange(activeCur, activePrev) }
+      : { value: sessionUsers, change: pctChange(sessionUsers, prevSessionUsers) }
 
-  // ---- KPI 1: Total Installs -----------------------------------------------
-  // Prefer store-reported installs (scraper-fed play_installs) when present;
-  // fall back to GA4 `first_open` as a proxy for new installs in the window.
-  const worldwideInstalls = installs.filter((r) => r.country === 'ALL')
-  const installRows = worldwideInstalls.length > 0 ? worldwideInstalls : installs
-  const storeInstallTotal = installRows.reduce((sum, r) => sum + (r.installs ?? 0), 0)
-  const firstOpenTotal = sumByEventName(events, 'first_open')
-  const prevFirstOpenTotal = sumByEventName(prevEvents, 'first_open')
+    // ---- Avg Rating (Play Store) ----
+    const ratings = (ratingsRes.data ?? []) as any[]
+    const latestRating = ratings[0]
+    const prevRating = ratings[1]
+    const ratingsSourced = !!latestRating
+    const avgRating: KPIMetric = ratingsSourced
+      ? {
+          value: Number(latestRating.avg_rating) || 0,
+          change: prevRating ? pctChange(Number(latestRating.avg_rating) || 0, Number(prevRating.avg_rating) || 0) : null,
+        }
+      : { value: 0, change: null }
 
-  const totalInstalls: KPIMetric =
-    storeInstallTotal > 0
-      ? { value: storeInstallTotal, change: MOCK_APP_PERFORMANCE_DATA.totalInstalls.change }
-      : { value: firstOpenTotal, change: pctChange(firstOpenTotal, prevFirstOpenTotal) }
+    // ---- Onboarding Rate = onboarding-complete users / new installs (approx) ----
+    const onbCur = firstOpen > 0 ? (completeUsers / firstOpen) * 100 : 0
+    const onbPrev = prevFirstOpen > 0 ? (prevCompleteUsers / prevFirstOpen) * 100 : 0
+    const onboardingRate: KPIMetric = { value: onbCur, change: pctChange(onbCur, onbPrev) }
 
-  // ---- KPI 2: Active Users --------------------------------------------------
-  // Prefer summed event_count (total sessions); if GA4 hasn't populated
-  // event_count for session_start yet but has populated the users column,
-  // fall back to summed unique users so the KPI doesn't read as a hard zero.
-  const sessionStartTotal = sumByEventName(events, 'session_start')
-  const prevSessionStartTotal = sumByEventName(prevEvents, 'session_start')
-  const sessionStartUserTotal = sumUsersByEventName(events, 'session_start')
-  const prevSessionStartUserTotal = sumUsersByEventName(prevEvents, 'session_start')
-  const activeUsersValue = sessionStartTotal > 0 ? sessionStartTotal : sessionStartUserTotal
-  const activeUsersPrevValue = sessionStartTotal > 0 ? prevSessionStartTotal : prevSessionStartUserTotal
-  const activeUsers: KPIMetric = {
-    value: activeUsersValue,
-    change: pctChange(activeUsersValue, activeUsersPrevValue),
-  }
+    // ---- Transaction Rate = transacting users / users reaching dashboard ----
+    const txCur = dashboardUsers > 0 ? (txUsers / dashboardUsers) * 100 : 0
+    const txPrev = prevDashboardUsers > 0 ? (prevTxUsers / prevDashboardUsers) * 100 : 0
+    const transactionRate: KPIMetric = { value: txCur, change: pctChange(txCur, txPrev) }
 
-  // ---- KPI 3: Avg Rating (combined Play Store + App Store) ------------------
-  const latestRating = ratings[0]
-  const previousRating = ratings[1]
-  const avgRating: KPIMetric = latestRating
-    ? {
-        value: latestRating.avg_rating ?? 0,
-        change: previousRating
-          ? pctChange(latestRating.avg_rating ?? 0, previousRating.avg_rating ?? 0)
-          : MOCK_APP_PERFORMANCE_DATA.avgRating.change,
-      }
-    : MOCK_APP_PERFORMANCE_DATA.avgRating
+    // ---- Trend: daily new installs (first_open) vs daily active users (session_start users) ----
+    const byDate = new Map<string, { installs: number; active: number }>()
+    for (const row of events) {
+      const n = U(row)
+      if (n !== 'FIRST_OPEN' && n !== 'SESSION_START') continue
+      const e = byDate.get(row.date) ?? { installs: 0, active: 0 }
+      if (n === 'FIRST_OPEN') e.installs += Number(row.event_count) || 0
+      if (n === 'SESSION_START') e.active += Number(row.users) || 0
+      byDate.set(row.date, e)
+    }
+    const usageTrend: AreaChartDataPoint[] = Array.from(byDate.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, e]) => ({ date: formatTrendDate(date), value: e.installs, secondaryValue: e.active }))
 
-  // ---- KPI 4: Onboarding Rate = onboarding completes / first_open ----------
-  const onboardingCompleteTotal = sumByEventName(events, 'EW_ONBOARDING_GUIDE_COMPLETE')
-  const prevOnboardingCompleteTotal = sumByEventName(prevEvents, 'EW_ONBOARDING_GUIDE_COMPLETE')
-  const onboardingRateCurrent = firstOpenTotal > 0 ? (onboardingCompleteTotal / firstOpenTotal) * 100 : 0
-  const onboardingRatePrevious =
-    prevFirstOpenTotal > 0 ? (prevOnboardingCompleteTotal / prevFirstOpenTotal) * 100 : 0
-  const onboardingRate: KPIMetric =
-    firstOpenTotal > 0
-      ? { value: onboardingRateCurrent, change: pctChange(onboardingRateCurrent, onboardingRatePrevious) }
-      : MOCK_APP_PERFORMANCE_DATA.onboardingRate
+    // ---- Onboarding funnel (all-platform, users). App-wide activity, not a cohort. ----
+    const onboardingFunnel: FunnelStep[] = [
+      { label: 'App Opened', value: firstOpen },
+      { label: 'Get Started', value: getStartedUsers },
+      { label: 'Reached Dashboard', value: dashboardUsers },
+      { label: 'Onboarding Complete', value: completeUsers },
+    ]
 
-  // ---- KPI 5: Transaction Rate = EA_SEND_* / SA_APP_DASHBOARD --------------
-  const sendEventsTotal = sumByPrefix(events, 'EA_SEND_')
-  const prevSendEventsTotal = sumByPrefix(prevEvents, 'EA_SEND_')
-  const dashboardTotal = sumByEventName(events, 'SA_APP_DASHBOARD')
-  const prevDashboardTotal = sumByEventName(prevEvents, 'SA_APP_DASHBOARD')
-  const transactionRateCurrent = dashboardTotal > 0 ? (sendEventsTotal / dashboardTotal) * 100 : 0
-  const transactionRatePrevious = prevDashboardTotal > 0 ? (prevSendEventsTotal / prevDashboardTotal) * 100 : 0
-  const transactionRate: KPIMetric =
-    dashboardTotal > 0
-      ? { value: transactionRateCurrent, change: pctChange(transactionRateCurrent, transactionRatePrevious) }
-      : MOCK_APP_PERFORMANCE_DATA.transactionRate
+    // ---- Rating distribution (star breakdown often unavailable → all zeros) ----
+    const stars = latestRating
+      ? [
+          { label: '5 star', value: Number(latestRating.star_5) || 0 },
+          { label: '4 star', value: Number(latestRating.star_4) || 0 },
+          { label: '3 star', value: Number(latestRating.star_3) || 0 },
+          { label: '2 star', value: Number(latestRating.star_2) || 0 },
+          { label: '1 star', value: Number(latestRating.star_1) || 0 },
+        ]
+      : []
+    const starBreakdownAvailable = stars.some((s) => s.value > 0)
+    const ratingDistribution = stars
 
-  // ---- Install / Active Users trend -----------------------------------------
-  // Daily first_open (installs proxy) vs. session_start (active users),
-  // merged into one series keyed by date.
-  const byDate = new Map<string, { installs: number; active: number }>()
-  for (const row of events) {
-    if (row.event_name !== 'first_open' && row.event_name !== 'session_start') continue
-    const entry = byDate.get(row.date) ?? { installs: 0, active: 0 }
-    if (row.event_name === 'first_open') entry.installs += row.event_count ?? 0
-    if (row.event_name === 'session_start') entry.active += row.event_count ?? 0
-    byDate.set(row.date, entry)
-  }
-  const usageTrend: AreaChartDataPoint[] = Array.from(byDate.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, agg]) => ({
-      date: formatTrendDate(date),
-      value: agg.installs,
-      secondaryValue: agg.active,
-    }))
+    const storeRatings: StoreRating[] = [
+      {
+        store: 'Google Play',
+        avgRating: ratingsSourced ? Number(latestRating.avg_rating) || 0 : 0,
+        reviewsCount: ratingsSourced ? Number(latestRating.reviews_count) || 0 : 0,
+        connected: ratingsSourced,
+      },
+      // App Store isn't sourced (needs App Store Connect / RU storefront).
+      { store: 'App Store', avgRating: 0, reviewsCount: 0, connected: false },
+    ]
 
-  // ---- Onboarding funnel: first_open -> SA_GET_STARTED -> SA_APP_DASHBOARD -> onboarding complete
-  const getStartedTotal = sumByEventName(events, 'SA_GET_STARTED')
-  const onboardingFunnelSteps: FunnelStep[] = [
-    { label: 'App Opened', value: firstOpenTotal },
-    { label: 'Get Started', value: getStartedTotal },
-    { label: 'Reached Dashboard', value: dashboardTotal },
-    { label: 'Onboarding Complete', value: onboardingCompleteTotal },
-  ]
-  const hasOnboardingFunnel = onboardingFunnelSteps.some((s) => s.value > 0)
-  const onboardingFunnel = hasOnboardingFunnel
-    ? onboardingFunnelSteps
-    : MOCK_APP_PERFORMANCE_DATA.onboardingFunnel
+    // ---- Feature usage: E?_T_* tile-click events ----
+    const tileTotals = new Map<string, number>()
+    for (const row of events) {
+      if (!/^E[AIW]_T_/.test(U(row))) continue
+      tileTotals.set(row.event_name, (tileTotals.get(row.event_name) ?? 0) + (Number(row.event_count) || 0))
+    }
+    const featureUsage: FeatureUsageRow[] = Array.from(tileTotals.entries())
+      .map(([eventName, clicks]) => ({ feature: tileFeatureLabel(eventName), eventName, clicks }))
+      .sort((a, b) => b.clicks - a.clicks)
+      .slice(0, 12)
 
-  // ---- Rating distribution + per-store ratings -------------------------------
-  // Note: play_ratings has no store-specific column in the current schema, so
-  // both Play Store and App Store display the same combined snapshot until a
-  // per-store breakdown is synced — better than fabricating separate numbers.
-  const ratingDistribution: RatingBucket[] = latestRating
-    ? [
-        { label: '5 star', value: latestRating.star_5 ?? 0 },
-        { label: '4 star', value: latestRating.star_4 ?? 0 },
-        { label: '3 star', value: latestRating.star_3 ?? 0 },
-        { label: '2 star', value: latestRating.star_2 ?? 0 },
-        { label: '1 star', value: latestRating.star_1 ?? 0 },
-      ]
-    : MOCK_APP_PERFORMANCE_DATA.ratingDistribution
+    // ---- Recent activity: top events on the most recent day with data ----
+    const latestEventDate = events.reduce<string | null>((latest, r) => (!latest || r.date > latest ? r.date : latest), null)
+    const latestDayRows = latestEventDate ? events.filter((r) => r.date === latestEventDate) : []
+    const recentActivity: RecentActivityRow[] = latestDayRows
+      .map((r) => ({ eventName: r.event_name, eventCount: Number(r.event_count) || 0, users: Number(r.users) || 0 }))
+      .sort((a, b) => b.eventCount - a.eventCount)
+      .slice(0, 10)
 
-  const storeRatings: StoreRating[] = latestRating
-    ? [
-        { store: 'Google Play', avgRating: latestRating.avg_rating ?? 0, reviewsCount: latestRating.reviews_count ?? 0 },
-        { store: 'App Store', avgRating: latestRating.avg_rating ?? 0, reviewsCount: latestRating.reviews_count ?? 0 },
-      ]
-    : MOCK_APP_PERFORMANCE_DATA.storeRatings
-
-  // ---- Feature usage: EA_T_* tile-click events -------------------------------
-  const tileEvents = events.filter((r) => r.event_name.startsWith('EA_T_'))
-  const tileTotals = new Map<string, number>()
-  for (const row of tileEvents) {
-    tileTotals.set(row.event_name, (tileTotals.get(row.event_name) ?? 0) + (row.event_count ?? 0))
-  }
-  const featureUsageRows: FeatureUsageRow[] = Array.from(tileTotals.entries())
-    .map(([eventName, clicks]) => ({
-      feature: tileFeatureLabel(eventName),
-      eventName,
-      clicks,
-    }))
-    .sort((a, b) => b.clicks - a.clicks)
-  const featureUsage = featureUsageRows.length > 0 ? featureUsageRows : MOCK_APP_PERFORMANCE_DATA.featureUsage
-
-  // ---- Recent activity: top events on the most recent day with data ---------
-  const latestEventDate = events.reduce<string | null>((latest, r) => {
-    if (!latest || r.date > latest) return r.date
-    return latest
-  }, null)
-  const latestDayRows = latestEventDate ? events.filter((r) => r.date === latestEventDate) : []
-  const recentActivityRows: RecentActivityRow[] = latestDayRows
-    .map((r) => ({ eventName: r.event_name, eventCount: r.event_count ?? 0, users: r.users ?? 0 }))
-    .sort((a, b) => b.eventCount - a.eventCount)
-    .slice(0, 10)
-  const recentActivity = recentActivityRows.length > 0 ? recentActivityRows : MOCK_APP_PERFORMANCE_DATA.recentActivity
-
-  return {
-    totalInstalls,
-    activeUsers,
-    avgRating,
-    onboardingRate,
-    transactionRate,
-    usageTrend: usageTrend.length > 0 ? usageTrend : MOCK_APP_PERFORMANCE_DATA.usageTrend,
-    onboardingFunnel,
-    ratingDistribution,
-    storeRatings,
-    featureUsage,
-    recentActivity,
+    return {
+      totalInstalls,
+      installsLifetime,
+      installsSourced,
+      activeUsers,
+      activeUsersSourced,
+      avgRating,
+      ratingsSourced,
+      onboardingRate,
+      transactionRate,
+      usageTrend,
+      onboardingFunnel,
+      ratingDistribution,
+      starBreakdownAvailable,
+      storeRatings,
+      featureUsage,
+      recentActivity,
+      hasEvents,
+    }
+  } catch {
+    return mockEmpty
   }
 }
 
-function getTrend(change: number): 'up' | 'down' | 'flat' {
+function getTrend(change: number | null): 'up' | 'down' | 'flat' {
+  if (!change) return 'flat'
   if (change > 0) return 'up'
   if (change < 0) return 'down'
   return 'flat'
-}
-
-function buildFunnelBars(steps: FunnelStep[]): BarChartDataPoint[] {
-  return steps.map((step) => ({ label: step.label, value: step.value }))
-}
-
-function funnelConversionRates(steps: FunnelStep[]): { from: string; to: string; rate: number }[] {
-  const rates: { from: string; to: string; rate: number }[] = []
-  for (let i = 1; i < steps.length; i++) {
-    const prev = steps[i - 1]
-    const curr = steps[i]
-    rates.push({
-      from: prev.label,
-      to: curr.label,
-      rate: prev.value > 0 ? (curr.value / prev.value) * 100 : 0,
-    })
-  }
-  return rates
-}
-
-function buildFeatureUsageBars(rows: FeatureUsageRow[]): BarChartDataPoint[] {
-  return rows.map((row) => ({ label: row.feature, value: row.clicks }))
 }
 
 const RECENT_ACTIVITY_COLUMNS: DataTableColumn[] = [
@@ -460,61 +348,83 @@ export default async function AppPerformancePage({
   searchParams: { range?: string }
 }) {
   const data = await getAppPerformanceData(searchParams)
-  const funnelBars = buildFunnelBars(data.onboardingFunnel)
-  const conversionRates = funnelConversionRates(data.onboardingFunnel)
-  const featureUsageBars = buildFeatureUsageBars(data.featureUsage)
 
+  const funnelBars: BarChartDataPoint[] = data.onboardingFunnel.map((s) => ({ label: s.label, value: s.value }))
+  const featureUsageBars: BarChartDataPoint[] = data.featureUsage.map((r) => ({ label: r.feature, value: r.clicks }))
   const recentActivityRows = data.recentActivity.map((row) => ({
     eventName: row.eventName,
     eventCount: formatNumber(row.eventCount),
     users: formatNumber(row.users),
   }))
 
+  const notLive: string[] = []
+  if (!data.hasEvents) notLive.push('No GA4 app events for this period — figures may be incomplete.')
+  if (!data.installsSourced) notLive.push('Total Installs uses the GA4 first_open proxy — the Play Store install count is not synced.')
+  if (!data.ratingsSourced) notLive.push('Store ratings are not synced yet.')
+  if (data.ratingsSourced && !data.starBreakdownAvailable) notLive.push('Rating star breakdown is not provided by the Play Store listing (shows blanks).')
+  notLive.push('App Store is not connected (needs App Store Connect / the Russian storefront) — its card shows “Not connected”.')
+  if (!data.activeUsersSourced) notLive.push('Active Users falls back to session users (the GA4 app active-users metric is unavailable).')
+
   return (
     <div>
       <Header title="App Performance" />
 
+      {notLive.length > 0 && (
+        <div className="mb-6 rounded-lg border border-amber-300 bg-amber-50 p-4">
+          <p className="text-sm font-semibold text-amber-800">Some data isn&apos;t fully connected</p>
+          <ul className="mt-1 list-disc pl-5 text-xs text-amber-700">
+            {notLive.map((m) => (
+              <li key={m}>{m}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {/* KPI cards row */}
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         <KPICard
-          title="Total Installs"
+          title={data.installsLifetime ? 'Total Installs (lifetime)' : 'New Installs (period)'}
           value={formatNumber(data.totalInstalls.value)}
-          change={data.totalInstalls.change}
+          change={data.totalInstalls.change ?? undefined}
           trend={getTrend(data.totalInstalls.change)}
           iconName="smartphone"
-          tooltip="Store-reported installs (Play Store / App Store), or GA4 first_open events as a proxy when store data isn't synced yet"
+          tooltip={
+            data.installsLifetime
+              ? 'Cumulative installs from the Play Store listing (latest snapshot — an approximate badge like 100,000+, not summed). App Store not included.'
+              : 'New installs this period, proxied by GA4 first_open (Play Store install count not synced).'
+          }
         />
         <KPICard
           title="Active Users"
           value={formatNumber(data.activeUsers.value)}
-          change={data.activeUsers.change}
+          change={data.activeUsers.change ?? undefined}
           trend={getTrend(data.activeUsers.change)}
           iconName="users"
-          tooltip="App sessions started (GA4 session_start) in the selected date range"
+          tooltip="De-duplicated active users of the Sahal Wallet app for this period (GA4 app property)."
         />
         <KPICard
           title="Avg Rating"
-          value={data.avgRating.value.toFixed(1)}
-          change={data.avgRating.change}
+          value={data.ratingsSourced ? data.avgRating.value.toFixed(1) : '—'}
+          change={data.avgRating.change ?? undefined}
           trend={getTrend(data.avgRating.change)}
           iconName="trending-up"
-          tooltip="Combined average star rating across Play Store and App Store (out of 5)"
+          tooltip="Average Play Store star rating (out of 5). App Store not connected."
         />
         <KPICard
           title="Onboarding Rate"
           value={formatPercent(data.onboardingRate.value)}
-          change={data.onboardingRate.change}
+          change={data.onboardingRate.change ?? undefined}
           trend={getTrend(data.onboardingRate.change)}
           iconName="filter"
-          tooltip="Percentage of app opens that complete the onboarding guide (EW_ONBOARDING_GUIDE_COMPLETE / first_open)"
+          tooltip="Onboarding completions vs new installs (approx.): users completing *_ONBOARDING_GUIDE_COMPLETE ÷ first_open."
         />
         <KPICard
           title="Transaction Rate"
           value={formatPercent(data.transactionRate.value)}
-          change={data.transactionRate.change}
+          change={data.transactionRate.change ?? undefined}
           trend={getTrend(data.transactionRate.change)}
           iconName="dollar-sign"
-          tooltip="Percentage of users reaching the dashboard who initiate a send/transfer (EA_SEND_* / SA_APP_DASHBOARD)"
+          tooltip="Transacting users ÷ users reaching the dashboard (send / swap / ramp events, all platforms)."
         />
       </div>
 
@@ -522,85 +432,75 @@ export default async function AppPerformancePage({
       <div className="mb-6">
         <AreaChart
           data={data.usageTrend}
-          title="Installs vs. Active Users (30 Days)"
+          title="New Installs vs. Active Users (daily)"
           color="#01A6FA"
           fillColor="#D0EFFF"
-          seriesLabel="New Installs"
-          secondarySeriesLabel="Active Users"
+          seriesLabel="New Installs (first_open)"
+          secondarySeriesLabel="Active Users (daily)"
           secondaryColor="#E5B897"
           height={320}
         />
       </div>
 
-      {/* Two-column grid: onboarding funnel + rating distribution */}
-      <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* Onboarding funnel */}
-        <div>
-          <BarChart
-            data={funnelBars}
-            title="Onboarding Funnel"
-            color="#01A6FA"
-            height={280}
-            layout="vertical"
-          />
-          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
-            {conversionRates.map((rate) => (
-              <div
-                key={`${rate.from}-${rate.to}`}
-                className="rounded-xl bg-mrhb-white p-4 shadow-sm"
-              >
-                <p className="text-xs font-medium text-mrhb-dark/50">
-                  {rate.from} → {rate.to}
-                </p>
-                <p className="mt-1 text-lg font-semibold text-mrhb-blue">
-                  {formatPercent(rate.rate)}
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Rating distribution */}
-        <div>
-          <BarChart
-            data={data.ratingDistribution}
-            title="Rating Distribution"
-            color="#E5B897"
-            height={280}
-            layout="horizontal"
-          />
-          <p className="mt-2 text-xs text-mrhb-dark/50">
-            Star-by-star breakdown may show 0s until the Play Store / App Store scraper provides a full distribution.
-          </p>
-        </div>
+      {/* Onboarding funnel */}
+      <div className="mb-6">
+        <BarChart data={funnelBars} title="App Activity by Stage" color="#01A6FA" height={300} layout="vertical" />
+        <p className="mt-2 text-xs text-mrhb-dark/50">
+          App-wide activity in this period (unique users per stage), not a single install cohort — later stages
+          count your whole active base, so they can exceed new installs. &ldquo;Onboarding Complete&rdquo; is
+          matched across Android/iOS/web (*_ONBOARDING_GUIDE_COMPLETE).
+        </p>
       </div>
 
-      {/* Store ratings side by side */}
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
-        {data.storeRatings.map((store) => (
-          <div key={store.store} className="rounded-xl bg-mrhb-white p-5 shadow-sm">
-            <p className="text-sm font-medium text-mrhb-dark/60">{store.store}</p>
-            <div className="mt-2 flex items-baseline gap-2">
-              <p className="text-2xl font-semibold text-mrhb-dark">{store.avgRating.toFixed(1)}</p>
-              <span className="text-mrhb-warm-tan">★</span>
+      {/* Ratings */}
+      <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <div>
+          {data.starBreakdownAvailable ? (
+            <BarChart data={data.ratingDistribution} title="Rating Distribution" color="#E5B897" height={280} layout="horizontal" />
+          ) : (
+            <div className="flex h-full min-h-[200px] flex-col justify-center rounded-xl bg-mrhb-white p-5 shadow-sm">
+              <h3 className="mb-2 text-base font-semibold text-mrhb-dark">Rating Distribution</h3>
+              <p className="text-sm text-mrhb-dark/50">
+                A star-by-star breakdown isn&apos;t provided by the Play Store listing, so it can&apos;t be shown.
+                The average rating and review count above are live.
+              </p>
             </div>
-            <p className="mt-1 text-xs text-mrhb-dark/50">
-              {formatNumber(store.reviewsCount)} reviews
-            </p>
-          </div>
-        ))}
+          )}
+        </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {data.storeRatings.map((store) => (
+            <div
+              key={store.store}
+              className={`rounded-xl p-5 shadow-sm ${store.connected ? 'bg-mrhb-white' : 'border border-dashed border-mrhb-warm-grey/50 bg-mrhb-cream/40'}`}
+            >
+              <p className="text-sm font-medium text-mrhb-dark/60">{store.store}</p>
+              {store.connected ? (
+                <>
+                  <div className="mt-2 flex items-baseline gap-2">
+                    <p className="text-2xl font-semibold text-mrhb-dark">{store.avgRating.toFixed(1)}</p>
+                    <span className="text-mrhb-warm-tan">★</span>
+                  </div>
+                  <p className="mt-1 text-xs text-mrhb-dark/50">{formatNumber(store.reviewsCount)} reviews</p>
+                </>
+              ) : (
+                <div className="mt-2">
+                  <span className="inline-flex items-center rounded-full bg-mrhb-warm-grey/20 px-2.5 py-1 text-[11px] font-semibold text-mrhb-dark/50">
+                    Not connected
+                  </span>
+                  <p className="mt-2 text-xs text-mrhb-dark/50">Needs App Store Connect (Russian storefront).</p>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* Feature usage — tile click events */}
-      <div className="mb-6">
-        <BarChart
-          data={featureUsageBars}
-          title="Feature Usage (Tile Clicks)"
-          color="#01A6FA"
-          height={320}
-          layout="vertical"
-        />
-      </div>
+      {featureUsageBars.length > 0 && (
+        <div className="mb-6">
+          <BarChart data={featureUsageBars} title="Feature Usage (Tile Clicks)" color="#01A6FA" height={320} layout="vertical" />
+        </div>
+      )}
 
       {/* Recent activity */}
       <div>
