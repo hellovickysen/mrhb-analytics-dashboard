@@ -203,18 +203,23 @@ const RANGE_LABELS: Record<string, string> = {
 
 // Smooth pink→navy colour ramp across the funnel (from/to = subtle per-band
 // gradient). Connected stages use their colour; not-connected renders muted.
+// MRHB brand palette: blue (#01A6FA) for the web/acquisition stages,
+// transitioning to a rich brand tan/bronze for the app + revenue stages. Every
+// shade is kept saturated/dark enough for white text and to stand out from the
+// cream page background (a literal blue→pale-tan blend goes muddy/low-contrast
+// in the middle, which is what we're avoiding).
 const STAGE_COLORS: Record<string, { from: string; to: string }> = {
-  Impressions: { from: '#DB2777', to: '#EC4899' },
-  Clicks: { from: '#C026D3', to: '#DB2777' },
-  'App Installs': { from: '#9333EA', to: '#C026D3' },
-  '1st Dashboard': { from: '#6D28D9', to: '#8B3DE0' },
-  '1st Transaction': { from: '#4338CA', to: '#5B4FE0' },
-  Revenue: { from: '#3730A3', to: '#4F46E5' },
+  Impressions: { from: '#015E8C', to: '#0176B0' },
+  Clicks: { from: '#0176B0', to: '#0192D6' },
+  'App Installs': { from: '#0E8FB8', to: '#2FA6B0' },
+  '1st Dashboard': { from: '#C08A3A', to: '#D19B48' },
+  '1st Transaction': { from: '#B07E33', to: '#C28E40' },
+  Revenue: { from: '#8A5A2B', to: '#A56E38' },
 }
 
-// Not-connected bands use a clearly-visible slate (not a pale beige that blends
-// into the cream page background).
-const MUTED_FILL = 'linear-gradient(135deg, #64748B, #94A3B8)'
+// Not-connected bands: a darker brand warm-grey — clearly visible on the cream
+// page background (not a pale beige that blends in).
+const MUTED_FILL = 'linear-gradient(135deg, #9A8C74, #B4A88F)'
 
 const stageColumns: DataTableColumn[] = [
   { key: 'stage', label: 'Stage', sortable: false },
