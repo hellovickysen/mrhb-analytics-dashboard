@@ -12,7 +12,6 @@ import {
   LayoutDashboard,
   ArrowLeftRight,
   DollarSign,
-  ChevronDown,
   Info,
   type LucideIcon,
 } from 'lucide-react'
@@ -267,8 +266,14 @@ export default async function FunnelPage({
   const data = await getJourneyData(searchParams)
   const rangeLabel = RANGE_LABELS[searchParams?.range ?? '30d'] ?? 'Last 30 Days'
 
-  const maxValue = data.stages.reduce((m, s) => Math.max(m, s.value), 0) || 1
   const topValue = data.stages[0]?.value ?? 0
+  // Cone width uses a compressed (sqrt) scale so the funnel tapers smoothly
+  // instead of collapsing to slivers when one stage (Impressions) dwarfs the
+  // rest — while still being volume-driven (never faked). Min 30% keeps every
+  // stage legible.
+  const maxSqrt = data.stages.reduce((m, s) => Math.max(m, s.sourced ? Math.sqrt(s.value) : 0), 0) || 1
+  const coneWidth = (s: StageResult): number =>
+    s.sourced && s.value > 0 ? Math.max(30, Math.round((Math.sqrt(s.value) / maxSqrt) * 100)) : 30
 
   const stageRows = data.stages.map((s) => ({
     stage: s.name,
@@ -287,93 +292,61 @@ export default async function FunnelPage({
       <div className="mb-6 overflow-hidden rounded-2xl bg-mrhb-white shadow-sm ring-1 ring-mrhb-warm-grey/10">
         <div className="flex flex-col gap-1 border-b border-mrhb-warm-grey/10 bg-gradient-to-r from-mrhb-blue/5 to-transparent px-6 py-5">
           <h2 className="text-lg font-semibold text-mrhb-dark">Acquisition → Revenue</h2>
-          <p className="text-xs text-mrhb-dark/50">{rangeLabel} · width shows relative volume</p>
+          <p className="text-xs text-mrhb-dark/50">{rangeLabel} · bar width ∝ volume (compressed scale)</p>
         </div>
 
         <div className="px-4 py-6 sm:px-6">
           {data.stages.length === 0 ? (
             <p className="py-10 text-center text-sm text-mrhb-dark/50">No journey data for this period.</p>
           ) : (
-            <div className="mx-auto flex max-w-3xl flex-col">
+            <div className="mx-auto flex max-w-2xl flex-col items-stretch gap-2.5">
               {data.stages.map((stage, index) => {
                 const meta = STAGE_META[stage.name] ?? { icon: Eye, from: '#01A6FA', to: '#38BDF8' }
                 const Icon = meta.icon
-                const fillPct = stage.sourced ? Math.max(4, Math.round((stage.value / maxValue) * 100)) : 0
+                const width = coneWidth(stage)
                 const shareOfTop = stage.sourced && topValue > 0 ? (stage.value / topValue) * 100 : null
-                const isLast = index === data.stages.length - 1
 
                 return (
-                  <div key={stage.name}>
-                    <div
-                      className={`group relative rounded-xl border p-4 transition-all duration-200 hover:shadow-md ${
-                        stage.sourced
-                          ? 'border-mrhb-warm-grey/15 bg-mrhb-white'
-                          : 'border-dashed border-mrhb-warm-grey/40 bg-mrhb-cream/40'
-                      }`}
-                    >
-                      <div className="flex items-center gap-4">
-                        {/* Icon tile */}
-                        <div
-                          className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-xl text-white shadow-sm"
-                          style={
-                            stage.sourced
-                              ? { backgroundImage: `linear-gradient(135deg, ${meta.from}, ${meta.to})` }
-                              : { backgroundColor: '#C9C0B4' }
-                          }
-                        >
-                          <Icon size={22} />
-                        </div>
-
-                        {/* Name + note */}
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <span className="text-[11px] font-bold text-mrhb-dark/30">{index + 1}</span>
-                            <h3 className="truncate text-sm font-semibold text-mrhb-dark sm:text-base">{stage.name}</h3>
-                          </div>
-                          <p className="mt-0.5 text-xs leading-snug text-mrhb-dark/50">{stage.note}</p>
-                        </div>
-
-                        {/* Value + status */}
-                        <div className="flex-shrink-0 text-right">
-                          {stage.sourced ? (
-                            <>
-                              <p className="text-2xl font-bold leading-none text-mrhb-dark">
-                                {formatNumber(stage.value)}
-                              </p>
-                              {shareOfTop !== null && (
-                                <p className="mt-1 text-[11px] font-medium text-mrhb-dark/40">
-                                  {shareOfTop.toFixed(shareOfTop >= 10 ? 0 : 1)}% of top
-                                </p>
-                              )}
-                            </>
-                          ) : (
-                            <span className="inline-flex items-center rounded-full bg-mrhb-warm-grey/20 px-2.5 py-1 text-[11px] font-semibold text-mrhb-dark/50">
-                              Not connected
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Magnitude fill bar */}
-                      <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-mrhb-warm-grey/15">
-                        <div
-                          className="h-full rounded-full transition-all duration-500"
-                          style={{
-                            width: `${fillPct}%`,
-                            backgroundImage: stage.sourced
-                              ? `linear-gradient(90deg, ${meta.from}, ${meta.to})`
-                              : 'none',
-                          }}
-                        />
-                      </div>
+                  <div key={stage.name} className="flex flex-col items-center">
+                    {/* Label above the bar */}
+                    <div className="mb-1 flex items-center gap-1.5">
+                      <span
+                        className="flex h-5 w-5 items-center justify-center rounded-md text-white"
+                        style={
+                          stage.sourced
+                            ? { backgroundImage: `linear-gradient(135deg, ${meta.from}, ${meta.to})` }
+                            : { backgroundColor: '#C9C0B4' }
+                        }
+                      >
+                        <Icon size={12} />
+                      </span>
+                      <span className="text-xs font-semibold text-mrhb-dark/70 sm:text-sm">
+                        {index + 1}. {stage.name}
+                      </span>
+                      {shareOfTop !== null && (
+                        <span className="text-[10px] font-medium text-mrhb-dark/35">
+                          · {shareOfTop.toFixed(shareOfTop >= 10 ? 0 : 1)}% of top
+                        </span>
+                      )}
                     </div>
 
-                    {/* Connector */}
-                    {!isLast && (
-                      <div className="flex justify-center py-1.5">
-                        <ChevronDown size={18} className="text-mrhb-warm-grey/50" />
-                      </div>
-                    )}
+                    {/* Cone bar (centered; width ∝ compressed volume) */}
+                    <div
+                      className={`flex min-h-[56px] w-full items-center justify-center rounded-xl px-4 text-center shadow-sm transition-all duration-500 ${
+                        stage.sourced ? 'text-white' : 'border-2 border-dashed border-mrhb-warm-grey/50 text-mrhb-dark/45'
+                      }`}
+                      style={
+                        stage.sourced
+                          ? { maxWidth: `${width}%`, backgroundImage: `linear-gradient(135deg, ${meta.from}, ${meta.to})` }
+                          : { maxWidth: `${width}%` }
+                      }
+                    >
+                      {stage.sourced ? (
+                        <span className="text-xl font-bold leading-none sm:text-2xl">{formatNumber(stage.value)}</span>
+                      ) : (
+                        <span className="text-xs font-semibold">Not connected</span>
+                      )}
+                    </div>
                   </div>
                 )
               })}
