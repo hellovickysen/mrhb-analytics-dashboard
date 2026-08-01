@@ -3,26 +3,36 @@
 export interface FunnelChartStep {
   name: string
   value: number
-  /** Percentage of the first stage's value that reached this stage (0-100). */
+  /** Bar width as a share of the widest stage (0-100) — drives the silhouette. */
   percentage: number
   /** Percentage lost vs. the immediately preceding stage (0-100). 0 for the first stage. */
   dropOff: number
+  /**
+   * Optional sub-label shown under/next to the value instead of the default
+   * "X% of total" (e.g. a source note or "Not connected"). Lets the chart show
+   * cross-source stages honestly without implying same-cohort conversion.
+   */
+  note?: string
 }
 
 export interface FunnelChartProps {
   steps: FunnelChartStep[]
   title?: string
+  /**
+   * Show the red "-X% drop-off" marker between stages. Default true (true
+   * same-cohort funnels). Set false for cross-source/cross-population journeys
+   * where a between-stage "drop-off" would be misleading.
+   */
+  showDropOff?: boolean
 }
 
-// Bar width shrinks toward the center as we move down the funnel, giving the
-// classic "funnel" silhouette. Width is driven by `percentage` (share of the
-// top-of-funnel value), clamped to a sensible minimum so late stages stay
-// visible/readable even at very low volumes.
+// Bar width shrinks toward the center as the value share falls, giving the
+// classic "funnel" silhouette. Clamped to a sensible minimum so low-volume or
+// not-yet-connected stages stay visible/readable.
 const MIN_WIDTH_PCT = 18
 
 // Gradient endpoints the bar fill interpolates across as steps progress:
-// mrhb-blue (#01A6FA) at the top of the funnel to mrhb-warm-tan (#E5B897)
-// at the bottom.
+// mrhb-blue (#01A6FA) at the top to mrhb-warm-tan (#E5B897) at the bottom.
 const GRADIENT_START = { r: 0x01, g: 0xa6, b: 0xfa }
 const GRADIENT_END = { r: 0xe5, g: 0xb8, b: 0x97 }
 
@@ -43,7 +53,7 @@ function stepColor(index: number, total: number): string {
   return `rgb(${r}, ${g}, ${b})`
 }
 
-export default function FunnelChart({ steps, title }: FunnelChartProps) {
+export default function FunnelChart({ steps, title, showDropOff = true }: FunnelChartProps) {
   return (
     <div className="rounded-xl bg-mrhb-white p-5 shadow-sm">
       {title && (
@@ -62,7 +72,7 @@ export default function FunnelChart({ steps, title }: FunnelChartProps) {
 
             return (
               <div key={step.name}>
-                {!isFirst && (
+                {showDropOff && !isFirst && (
                   <div className="flex items-center justify-center gap-1.5 py-1 text-xs font-medium text-red-500">
                     <span aria-hidden className="text-red-400">&#9660;</span>
                     <span>-{step.dropOff.toFixed(1)}% drop-off</span>
@@ -86,7 +96,7 @@ export default function FunnelChart({ steps, title }: FunnelChartProps) {
                           {step.value.toLocaleString()}
                         </p>
                         <p className="text-[11px] font-medium text-mrhb-white/80">
-                          {step.percentage.toFixed(1)}% of total
+                          {step.note ?? `${step.percentage.toFixed(1)}% of total`}
                         </p>
                       </div>
                     </div>
