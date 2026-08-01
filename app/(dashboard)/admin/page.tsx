@@ -13,16 +13,17 @@ import {
   Link2,
   MousePointerClick,
   AlertTriangle,
+  XCircle,
   type LucideIcon,
 } from 'lucide-react'
 import { formatDate } from '@/lib/utils/format'
 
 // ---------------------------------------------------------------------------
-// Admin — Tracked Events is now REAL: it loads from and saves to the
-// `tracked_events` table via /api/admin/tracked-events (service role). Each
-// event can be assigned a Funnel Stage + order, which drives the User Journey
-// funnel's app-event stages. Data Sources / Sync History below are still
-// placeholder samples (labelled as such) pending a later wiring pass.
+// Admin — all three sections are now REAL:
+//  • Tracked Events  → /api/admin/tracked-events (drives the funnel's app stages)
+//  • Data Sources    → /api/admin/sync-status (from data_sync_log); Sync Now
+//                      triggers /api/refresh for that source
+//  • Sync History    → /api/admin/sync-status (recent data_sync_log rows)
 // ---------------------------------------------------------------------------
 
 type EventCategory = 'transaction' | 'engagement' | 'conversion' | 'custom'
@@ -45,65 +46,83 @@ const CATEGORY_OPTIONS: { value: EventCategory; label: string }[] = [
   { value: 'custom', label: 'Custom' },
 ]
 
-// Funnel stages an event can feed. '(none)' = tracked but not on the funnel.
-// Order values align with the funnel: Installs=3, Dashboard=4, Transaction=5.
 const FUNNEL_STAGE_OPTIONS: { value: string; order: number }[] = [
   { value: '', order: 0 },
   { value: 'App Installs', order: 3 },
   { value: 'Transaction', order: 4 },
 ]
 
-type SourceId = 'ga4' | 'gsc' | 'play' | 'shortio' | 'clarity'
+type SourceId = 'ga4' | 'gsc' | 'shortio' | 'play' | 'clarity'
 
-interface DataSourceCard {
-  id: SourceId
+interface SourceMeta {
+  key: SourceId
   name: string
   icon: LucideIcon
-  lastSync: string
-  records: number
-  connected: boolean
   note?: string
 }
 
-const DATA_SOURCES: DataSourceCard[] = [
-  { id: 'ga4', name: 'Google Analytics', icon: BarChart3, lastSync: 'Auto (daily)', records: 24312, connected: true, note: 'Website + Sahal Wallet Firebase' },
-  { id: 'gsc', name: 'Google Search Console', icon: Search, lastSync: 'Auto (daily)', records: 4770, connected: true },
-  { id: 'play', name: 'Play Store + App Store', icon: Smartphone, lastSync: 'Auto (daily)', records: 2, connected: true, note: 'Scraped from public pages' },
-  { id: 'shortio', name: 'Short.io', icon: Link2, lastSync: 'Auto (daily)', records: 146, connected: true },
-  { id: 'clarity', name: 'Microsoft Clarity', icon: MousePointerClick, lastSync: 'Never', records: 0, connected: false, note: 'API limited — 0 data returned' },
+const SOURCE_META: SourceMeta[] = [
+  { key: 'ga4', name: 'Google Analytics', icon: BarChart3, note: 'Website + Sahal Wallet Firebase' },
+  { key: 'gsc', name: 'Google Search Console', icon: Search },
+  { key: 'play', name: 'Play Store + App Store', icon: Smartphone, note: 'Scraped from public pages' },
+  { key: 'shortio', name: 'Short.io', icon: Link2 },
+  { key: 'clarity', name: 'Microsoft Clarity', icon: MousePointerClick, note: 'API often returns 0 rows' },
 ]
 
-type SyncStatus = 'success' | 'error'
-
-interface SyncHistoryRow {
-  id: string
-  source: string
-  startedAt: string
-  completedAt: string
-  status: SyncStatus
-  recordsSynced: number
+const SOURCE_NAME: Record<string, string> = {
+  ga4: 'Google Analytics',
+  gsc: 'Google Search Console',
+  shortio: 'Short.io',
+  play: 'Play Store + App Store',
+  clarity: 'Microsoft Clarity',
 }
 
-const SYNC_HISTORY: SyncHistoryRow[] = [
-  { id: 'sync-1', source: 'Google Analytics', startedAt: '2026-07-23T11:02:00Z', completedAt: '2026-07-23T11:04:12Z', status: 'success', recordsSynced: 1840 },
-  { id: 'sync-2', source: 'Google Search Console', startedAt: '2026-07-23T10:05:00Z', completedAt: '2026-07-23T10:06:40Z', status: 'success', recordsSynced: 620 },
-  { id: 'sync-3', source: 'Google Play Console', startedAt: '2026-07-23T12:00:00Z', completedAt: '2026-07-23T12:01:35Z', status: 'success', recordsSynced: 340 },
-  { id: 'sync-4', source: 'Short.io', startedAt: '2026-07-23T12:30:00Z', completedAt: '2026-07-23T12:30:48Z', status: 'success', recordsSynced: 58 },
-  { id: 'sync-5', source: 'Microsoft Clarity', startedAt: '2026-07-23T09:00:00Z', completedAt: '2026-07-23T09:00:52Z', status: 'success', recordsSynced: 4 },
-]
+interface SourceStatus {
+  key: string
+  lastSyncAt: string | null
+  lastStatus: string | null
+  records: number
+}
 
-function formatTime(iso: string): string {
+interface HistoryRow {
+  source: string
+  status: string
+  started_at: string
+  completed_at: string | null
+  records_synced: number
+  error_message: string | null
+}
+
+function formatTime(iso: string | null): string {
   if (!iso) return '—'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return '—'
   return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
 }
 
+function relTime(iso: string | null): string {
+  if (!iso) return 'Never'
+  const t = new Date(iso).getTime()
+  if (!Number.isFinite(t)) return '—'
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000))
+  if (s < 60) return 'just now'
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  const d = Math.floor(h / 24)
+  return `${d}d ago`
+}
+
+function statusPill(status: string | null): { label: string; cls: string } {
+  if (status === 'success') return { label: 'Active', cls: 'bg-emerald-50 text-emerald-600' }
+  if (status === 'error') return { label: 'Error', cls: 'bg-red-50 text-red-500' }
+  if (status === 'running') return { label: 'Running', cls: 'bg-mrhb-blue-light text-mrhb-blue' }
+  return { label: 'No data', cls: 'bg-mrhb-warm-grey/20 text-mrhb-dark/50' }
+}
+
 let nextEventCounter = 1
 
-// -----------------------------------------------------------------------------
-// Toggle switch
-// -----------------------------------------------------------------------------
 function Toggle({
   checked,
   onChange,
@@ -133,48 +152,60 @@ function Toggle({
   )
 }
 
-// -----------------------------------------------------------------------------
-// Data source card (sample — not yet wired to live sync)
-// -----------------------------------------------------------------------------
-function DataSourceStatusCard({ source }: { source: DataSourceCard }) {
+function DataSourceStatusCard({
+  meta,
+  status,
+  onSynced,
+}: {
+  meta: SourceMeta
+  status: SourceStatus | undefined
+  onSynced: () => void
+}) {
   const [isSyncing, setIsSyncing] = useState(false)
-  const [lastSync, setLastSync] = useState(source.lastSync)
-  const Icon = source.icon
+  const Icon = meta.icon
+  const st = status?.lastStatus ?? null
+  const pill = statusPill(st)
+  const ok = st === 'success'
 
   const handleSync = () => {
     if (isSyncing) return
     setIsSyncing(true)
-    setTimeout(() => {
-      setIsSyncing(false)
-      setLastSync('just now')
-    }, 1600)
+    fetch('/api/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: meta.key, daysBack: 7 }),
+    })
+      .then((r) => r.json())
+      .catch(() => {})
+      .finally(() => {
+        setIsSyncing(false)
+        onSynced()
+      })
   }
 
   return (
     <div className="rounded-xl bg-mrhb-white p-5 shadow-sm">
       <div className="flex items-center justify-between">
-        <div className={`flex h-10 w-10 items-center justify-center rounded-full ${source.connected ? 'bg-mrhb-blue-light' : 'bg-red-50'}`}>
-          <Icon size={20} className={source.connected ? 'text-mrhb-blue' : 'text-red-400'} />
+        <div className={`flex h-10 w-10 items-center justify-center rounded-full ${ok ? 'bg-mrhb-blue-light' : 'bg-mrhb-warm-grey/20'}`}>
+          <Icon size={20} className={ok ? 'text-mrhb-blue' : 'text-mrhb-dark/40'} />
         </div>
-        <div className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
-          source.connected ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-500'
-        }`}>
-          <CheckCircle2 size={13} />
-          {source.connected ? 'Connected' : 'Not Connected'}
+        <div className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${pill.cls}`}>
+          {st === 'error' ? <XCircle size={13} /> : <CheckCircle2 size={13} />}
+          {pill.label}
         </div>
       </div>
 
-      <p className="mt-4 text-sm font-semibold text-mrhb-dark">{source.name}</p>
-      {source.note && <p className="mt-0.5 text-[11px] text-mrhb-dark/40">{source.note}</p>}
+      <p className="mt-4 text-sm font-semibold text-mrhb-dark">{meta.name}</p>
+      {meta.note && <p className="mt-0.5 text-[11px] text-mrhb-dark/40">{meta.note}</p>}
 
       <dl className="mt-3 space-y-1.5 text-xs text-mrhb-dark/60">
         <div className="flex items-center justify-between">
           <dt>Last sync</dt>
-          <dd className="font-medium text-mrhb-dark/80">{lastSync}</dd>
+          <dd className="font-medium text-mrhb-dark/80">{relTime(status?.lastSyncAt ?? null)}</dd>
         </div>
         <div className="flex items-center justify-between">
-          <dt>Records</dt>
-          <dd className="font-medium text-mrhb-dark/80">{source.records.toLocaleString()}</dd>
+          <dt>Records (last run)</dt>
+          <dd className="font-medium text-mrhb-dark/80">{(status?.records ?? 0).toLocaleString()}</dd>
         </div>
       </dl>
 
@@ -191,9 +222,6 @@ function DataSourceStatusCard({ source }: { source: DataSourceCard }) {
   )
 }
 
-// -----------------------------------------------------------------------------
-// Page
-// -----------------------------------------------------------------------------
 export default function AdminPage() {
   const [events, setEvents] = useState<TrackedEventRow[]>([])
   const [loading, setLoading] = useState(true)
@@ -201,6 +229,10 @@ export default function AdminPage() {
   const [saveMessage, setSaveMessage] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [migrationNeeded, setMigrationNeeded] = useState(false)
+
+  const [sources, setSources] = useState<SourceStatus[]>([])
+  const [history, setHistory] = useState<HistoryRow[]>([])
+  const [syncLoading, setSyncLoading] = useState(true)
 
   const load = () => {
     setLoading(true)
@@ -225,8 +257,21 @@ export default function AdminPage() {
       .finally(() => setLoading(false))
   }
 
+  const loadSyncStatus = () => {
+    setSyncLoading(true)
+    fetch('/api/admin/sync-status', { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((d) => {
+        setSources(d.sources ?? [])
+        setHistory(d.history ?? [])
+      })
+      .catch(() => {})
+      .finally(() => setSyncLoading(false))
+  }
+
   useEffect(() => {
     load()
+    loadSyncStatus()
   }, [])
 
   const updateEvent = (id: string, patch: Partial<TrackedEventRow>) => {
@@ -287,6 +332,8 @@ export default function AdminPage() {
       .finally(() => setSaving(false))
   }
 
+  const sourceByKey = (key: string): SourceStatus | undefined => sources.find((s) => s.key === key)
+
   return (
     <div>
       <div className="mb-6">
@@ -294,7 +341,6 @@ export default function AdminPage() {
         <p className="mt-1 text-sm text-mrhb-dark/60">Configure tracking events and manage data sources</p>
       </div>
 
-      {/* Migration prompt */}
       {migrationNeeded && (
         <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-4">
           <AlertTriangle size={16} className="mt-0.5 text-amber-600" />
@@ -457,56 +503,71 @@ export default function AdminPage() {
         )}
       </section>
 
-      {/* Section 2: Data Sources Status (sample) */}
+      {/* Section 2: Data Sources Status (live) */}
       <section className="mb-8">
-        <h2 className="mb-4 text-base font-semibold text-mrhb-dark">
-          Data Sources Status <span className="text-xs font-normal text-amber-600">· sample, not yet wired</span>
-        </h2>
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-base font-semibold text-mrhb-dark">Data Sources Status</h2>
+          <button
+            type="button"
+            onClick={loadSyncStatus}
+            className="flex items-center gap-1.5 text-xs font-medium text-mrhb-blue hover:underline"
+          >
+            <RefreshCw size={13} className={syncLoading ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+        </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-          {DATA_SOURCES.map((source) => (
-            <DataSourceStatusCard key={source.id} source={source} />
+          {SOURCE_META.map((meta) => (
+            <DataSourceStatusCard key={meta.key} meta={meta} status={sourceByKey(meta.key)} onSynced={loadSyncStatus} />
           ))}
         </div>
       </section>
 
-      {/* Section 3: Sync History (sample) */}
+      {/* Section 3: Sync History (live) */}
       <section>
         <div className="rounded-xl bg-mrhb-white p-5 shadow-sm">
-          <h2 className="mb-4 text-base font-semibold text-mrhb-dark">
-            Sync History <span className="text-xs font-normal text-amber-600">· sample, not yet wired</span>
-          </h2>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] border-collapse text-sm">
-              <thead>
-                <tr className="border-b border-mrhb-warm-grey/20">
-                  <th className="whitespace-nowrap px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Source</th>
-                  <th className="whitespace-nowrap px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Started</th>
-                  <th className="whitespace-nowrap px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Completed</th>
-                  <th className="whitespace-nowrap px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Status</th>
-                  <th className="whitespace-nowrap px-3 py-2.5 text-right text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Records Synced</th>
-                </tr>
-              </thead>
-              <tbody>
-                {SYNC_HISTORY.map((row) => (
-                  <tr key={row.id} className="border-b border-mrhb-warm-grey/10 last:border-0 hover:bg-mrhb-cream/60">
-                    <td className="whitespace-nowrap px-3 py-2.5 font-medium text-mrhb-dark">{row.source}</td>
-                    <td className="whitespace-nowrap px-3 py-2.5 text-mrhb-dark/70">{formatDate(row.startedAt)} &middot; {formatTime(row.startedAt)}</td>
-                    <td className="whitespace-nowrap px-3 py-2.5 text-mrhb-dark/70">
-                      {row.completedAt ? `${formatDate(row.completedAt)} · ${formatTime(row.completedAt)}` : '—'}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-2.5">
-                      <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${
-                        row.status === 'success' ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-500'
-                      }`}>
-                        {row.status === 'success' ? 'Success' : 'Error'}
-                      </span>
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-2.5 text-right text-mrhb-dark">{row.recordsSynced.toLocaleString()}</td>
+          <h2 className="mb-4 text-base font-semibold text-mrhb-dark">Sync History</h2>
+          {syncLoading ? (
+            <p className="py-6 text-center text-sm text-mrhb-dark/50">Loading sync history…</p>
+          ) : history.length === 0 ? (
+            <p className="py-6 text-center text-sm text-mrhb-dark/50">No sync runs recorded yet.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-mrhb-warm-grey/20">
+                    <th className="whitespace-nowrap px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Source</th>
+                    <th className="whitespace-nowrap px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Started</th>
+                    <th className="whitespace-nowrap px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Completed</th>
+                    <th className="whitespace-nowrap px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Status</th>
+                    <th className="whitespace-nowrap px-3 py-2.5 text-right text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Records Synced</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {history.map((row, i) => {
+                    const pill = statusPill(row.status)
+                    return (
+                      <tr key={`${row.source}-${row.started_at}-${i}`} className="border-b border-mrhb-warm-grey/10 last:border-0 hover:bg-mrhb-cream/60">
+                        <td className="whitespace-nowrap px-3 py-2.5 font-medium text-mrhb-dark">{SOURCE_NAME[row.source] ?? row.source}</td>
+                        <td className="whitespace-nowrap px-3 py-2.5 text-mrhb-dark/70">
+                          {formatDate(row.started_at)} &middot; {formatTime(row.started_at)}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2.5 text-mrhb-dark/70">
+                          {row.completed_at ? `${formatDate(row.completed_at)} · ${formatTime(row.completed_at)}` : '—'}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2.5">
+                          <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${pill.cls}`}>
+                            {pill.label}
+                          </span>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2.5 text-right text-mrhb-dark">{(row.records_synced ?? 0).toLocaleString()}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </section>
     </div>
