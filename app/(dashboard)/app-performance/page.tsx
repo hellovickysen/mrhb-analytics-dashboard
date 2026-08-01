@@ -7,6 +7,7 @@ import { formatNumber, formatPercent } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 import { fetchGA4AppActiveUsersTotal } from '@/lib/api-clients/ga4-app-active-total'
+import { fetchRecentPlayReviews, type PlayReviewItem } from '@/lib/api-clients/play-reviews'
 
 // ---------------------------------------------------------------------------
 // App Performance (Sahal Wallet) — reworked for correctness.
@@ -76,9 +77,12 @@ interface AppPerformanceData {
   onboardingFunnel: FunnelStep[]
   ratingDistribution: RatingBucket[]
   starBreakdownAvailable: boolean
+  starBreakdownFromSample: boolean
   storeRatings: StoreRating[]
   featureUsage: FeatureUsageRow[]
   recentActivity: RecentActivityRow[]
+  recentReviews: PlayReviewItem[]
+  reviewsSampledCount: number
   hasEvents: boolean
 }
 
@@ -164,14 +168,17 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
     onboardingFunnel: [],
     ratingDistribution: [],
     starBreakdownAvailable: false,
+    starBreakdownFromSample: false,
     storeRatings: [],
     featureUsage: [],
     recentActivity: [],
+    recentReviews: [],
+    reviewsSampledCount: 0,
     hasEvents: false,
   }
 
   try {
-    const [events, prevEvents, installsRes, ratingsRes, activeCur, activePrev] = await Promise.all([
+    const [events, prevEvents, installsRes, ratingsRes, activeCur, activePrev, reviews] = await Promise.all([
       fetchEvents(supabase, since, { lte: until }),
       fetchEvents(supabase, prevStartDate, { lt: since }),
       supabase.from('play_installs').select('date, installs, country').order('date', { ascending: false }).limit(180),
@@ -182,6 +189,7 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
         .limit(5),
       fetchGA4AppActiveUsersTotal(since, until),
       fetchGA4AppActiveUsersTotal(prevStartDate, since),
+      fetchRecentPlayReviews(2),
     ])
 
     const hasEvents = events.length > 0
@@ -263,17 +271,28 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
     ]
 
     // ---- Rating distribution (star breakdown often unavailable → all zeros) ----
-    const stars = latestRating
+    // Prefer a real star distribution from the recent-reviews sample (Android
+    // Publisher API); fall back to any stored star columns (usually empty).
+    const sampleStars = reviews.sampledCount > 0
+    const ratingDistribution: RatingBucket[] = sampleStars
       ? [
-          { label: '5 star', value: Number(latestRating.star_5) || 0 },
-          { label: '4 star', value: Number(latestRating.star_4) || 0 },
-          { label: '3 star', value: Number(latestRating.star_3) || 0 },
-          { label: '2 star', value: Number(latestRating.star_2) || 0 },
-          { label: '1 star', value: Number(latestRating.star_1) || 0 },
+          { label: '5 star', value: reviews.distribution.star5 },
+          { label: '4 star', value: reviews.distribution.star4 },
+          { label: '3 star', value: reviews.distribution.star3 },
+          { label: '2 star', value: reviews.distribution.star2 },
+          { label: '1 star', value: reviews.distribution.star1 },
         ]
-      : []
-    const starBreakdownAvailable = stars.some((s) => s.value > 0)
-    const ratingDistribution = stars
+      : latestRating
+        ? [
+            { label: '5 star', value: Number(latestRating.star_5) || 0 },
+            { label: '4 star', value: Number(latestRating.star_4) || 0 },
+            { label: '3 star', value: Number(latestRating.star_3) || 0 },
+            { label: '2 star', value: Number(latestRating.star_2) || 0 },
+            { label: '1 star', value: Number(latestRating.star_1) || 0 },
+          ]
+        : []
+    const starBreakdownFromSample = sampleStars
+    const starBreakdownAvailable = ratingDistribution.some((s) => s.value > 0)
 
     const storeRatings: StoreRating[] = [
       {
@@ -319,9 +338,12 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
       onboardingFunnel,
       ratingDistribution,
       starBreakdownAvailable,
+      starBreakdownFromSample,
       storeRatings,
       featureUsage,
       recentActivity,
+      recentReviews: reviews.reviews,
+      reviewsSampledCount: reviews.sampledCount,
       hasEvents,
     }
   } catch {
@@ -456,13 +478,21 @@ export default async function AppPerformancePage({
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
         <div>
           {data.starBreakdownAvailable ? (
-            <BarChart data={data.ratingDistribution} title="Rating Distribution" color="#E5B897" height={280} layout="horizontal" />
+            <>
+              <BarChart data={data.ratingDistribution} title="Rating Distribution" color="#E5B897" height={280} layout="horizontal" />
+              {data.starBreakdownFromSample && (
+                <p className="mt-2 text-xs text-mrhb-dark/50">
+                  Based on the {formatNumber(data.reviewsSampledCount)} most recent reviews (Android Publisher API) — a
+                  sample, not the full all-time histogram. The headline average uses the store-listing aggregate.
+                </p>
+              )}
+            </>
           ) : (
             <div className="flex h-full min-h-[200px] flex-col justify-center rounded-xl bg-mrhb-white p-5 shadow-sm">
               <h3 className="mb-2 text-base font-semibold text-mrhb-dark">Rating Distribution</h3>
               <p className="text-sm text-mrhb-dark/50">
-                A star-by-star breakdown isn&apos;t provided by the Play Store listing, so it can&apos;t be shown.
-                The average rating and review count above are live.
+                A star-by-star breakdown isn&apos;t available yet (no recent reviews returned). The average rating and
+                review count above are live.
               </p>
             </div>
           )}
@@ -494,6 +524,32 @@ export default async function AppPerformancePage({
           ))}
         </div>
       </div>
+
+      {/* Recent reviews (Play Store, Android Publisher API) */}
+      {data.recentReviews.length > 0 && (
+        <div className="mb-6 rounded-xl bg-mrhb-white p-5 shadow-sm">
+          <h3 className="mb-4 text-base font-semibold text-mrhb-dark">
+            Recent Reviews <span className="text-xs font-normal text-mrhb-dark/40">&middot; Play Store</span>
+          </h3>
+          <ul className="space-y-3">
+            {data.recentReviews.slice(0, 8).map((rv, i) => (
+              <li key={`${rv.author}-${rv.date}-${i}`} className="rounded-lg border border-mrhb-warm-grey/15 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="truncate text-sm font-medium text-mrhb-dark">{rv.author}</span>
+                  <span className="flex-shrink-0 text-sm">
+                    <span className="text-mrhb-warm-tan">{'★'.repeat(rv.rating)}</span>
+                    <span className="text-mrhb-warm-grey/40">{'★'.repeat(Math.max(0, 5 - rv.rating))}</span>
+                  </span>
+                </div>
+                {rv.text && <p className="mt-1 text-xs leading-snug text-mrhb-dark/70">{rv.text}</p>}
+                <p className="mt-1 text-[11px] text-mrhb-dark/40">
+                  {[rv.date, rv.version ? `v${rv.version}` : null, rv.device].filter(Boolean).join(' · ')}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Feature usage — tile click events */}
       {featureUsageBars.length > 0 && (
