@@ -1,425 +1,245 @@
 import Header from '@/components/layout/Header'
-import FunnelChart, { type FunnelChartStep } from '@/components/charts/FunnelChart'
+import KPICard from '@/components/cards/KPICard'
 import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
-import { formatNumber, formatPercent } from '@/lib/utils/format'
+import { formatNumber } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 
 // ---------------------------------------------------------------------------
-// Data fetching
+// User Journey (reworked)
 // ---------------------------------------------------------------------------
-// This is a Server Component. The funnel is stitched together live from
-// Short.io clicks -> GA4 web sessions -> real Firebase/GA4-for-Firebase event
-// names emitted by the Sahal mobile app, as recorded in `ga_events`. Firebase
-// automatically fires `first_open` on first app launch after install, so that
-// replaces the old Play Console install-count dependency entirely — there's
-// no more separate "Play Store View" stage since Play Console isn't wired up
-// as a source here.
+// Server Component. The old page presented a single monotonic "funnel" that
+// stitched four UNRELATED sources (Short.io clicks -> GA4 web sessions ->
+// Firebase app events -> a 7-day session proxy) into one cohort with fabricated
+// conversion %s, silently substituted mock numbers per stage, queried the wrong
+// (EW_) event prefixes so real Android/iOS onboarding+transaction events summed
+// to ~0, and inflated the top stage ~6x by reading Short.io's `domain_total`
+// aggregate instead of the authoritative per-range figure.
 //
-// Each stage is queried independently against `ga_events` (or, for the top
-// of the funnel, `shortio_clicks` / `ga_traffic`), so a gap in one event
-// stream doesn't take down the whole page. Per-stage results fall back to a
-// per-stage mock value when that stage's query errors or returns 0, and the
-// whole funnel falls back to the fully-mocked dataset only if every real
-// stage came back empty (i.e. `ga_events` hasn't synced anything yet).
+// This rework instead reports TWO clearly-separated, correctly-sourced tracks
+// and never presents mock as live:
 //
-// Firebase event volume isn't guaranteed to be monotonically decreasing the
-// way a strict funnel is (e.g. duplicate `SA_APP_DASHBOARD` fires per
-// session can outnumber `first_open` events from installs before the tracked
-// window). To keep the funnel visualization meaningful, later stages are
-// capped at the previous stage's value after all queries resolve.
+//   Track A — Web acquisition (Short.io + GA4 web):
+//     • Social link clicks   = authoritative Short.io range_<range> snapshot
+//                              (matches the Social page).
+//     • Social+referral web sessions = ga_traffic (website), channels
+//                              'Organic Social' + 'Referral' (there is no
+//                              'Social' channel in GA4).
+//
+//   Track B — App engagement (Firebase, ALL platforms SA/SI/SW + EA/EI/EW/EE):
+//     first_open (installs) → Get Started → Onboarding started/completed →
+//     Dashboard reached → Transaction activity → Returning. Event names are
+//     matched platform-agnostically (see RULES), and each milestone shows both
+//     the raw event count and GA4's per-event `users`.
+//
+// IMPORTANT (shown to users as a disclaimer): these tracks are NOT a single
+// tracked cohort. The app track measures the WHOLE active user base's events in
+// the window, not only users who installed in this window — so later milestones
+// can (and do) exceed installs. `users` is GA4's per-event user metric summed
+// over days: a ceiling, not a true unique-in-period count.
+//
+// All reads are bounded on both ends of the window. No per-stage mock: unsynced
+// sources render real zeros behind a clearly-labelled banner.
 
-interface FunnelStageRow {
-  name: string
+interface Milestone {
+  key: string
+  label: string
+  basis: string
+  count: number
   users: number
 }
 
-interface AttributionRow {
-  platform: string
-  shortioHumanClicks: number
-  ga4Sessions: number
+interface JourneyData {
+  // Track A
+  socialClicksTotal: number
+  socialClicksHuman: number
+  socialReferralSessions: number
+  webSourced: boolean
+  // Track B
+  milestones: Milestone[]
+  appSourced: boolean
+  // Attribution
+  attribution: { platform: string; clicks: number }[]
+  ga4SocialSessions: number
 }
 
-interface FunnelData {
-  stages: FunnelStageRow[]
-  attribution: AttributionRow[]
-}
-
-// Per-stage fallback values, used whenever that specific stage's query
-// errors or comes back with a zero sum. Keeping these per-stage (rather than
-// only an all-or-nothing mock) means a single slow-to-sync event name
-// doesn't blank out stages that do have real data.
-const STAGE_FALLBACKS = {
-  socialDiscovery: 14320,
-  websiteVisit: 9142,
-  appInstall: 1860,
-  onboardingStarted: 3210,
-  walletCreated: 1120,
-  onboardingComplete: 486,
-  firstTransaction: 486,
-  retained: 312,
-} as const
-
-const MOCK_FUNNEL_DATA: FunnelData = {
-  stages: [
-    { name: 'Social Discovery', users: STAGE_FALLBACKS.socialDiscovery },
-    { name: 'Website Visit', users: STAGE_FALLBACKS.websiteVisit },
-    { name: 'App Install', users: STAGE_FALLBACKS.appInstall },
-    { name: 'Onboarding Started', users: STAGE_FALLBACKS.onboardingStarted },
-    { name: 'Wallet Created', users: STAGE_FALLBACKS.walletCreated },
-    { name: 'Onboarding Complete', users: STAGE_FALLBACKS.onboardingComplete },
-    { name: 'First Transaction', users: STAGE_FALLBACKS.firstTransaction },
-    { name: 'Retained (30-day)', users: STAGE_FALLBACKS.retained },
-  ],
-  attribution: [
-    { platform: 'Twitter', shortioHumanClicks: 77, ga4Sessions: 3480 },
-    { platform: 'Telegram', shortioHumanClicks: 8, ga4Sessions: 410 },
-    { platform: 'Facebook', shortioHumanClicks: 6, ga4Sessions: 1820 },
-    { platform: 'LinkedIn', shortioHumanClicks: 5, ga4Sessions: 1690 },
-    { platform: 'Instagram', shortioHumanClicks: 4, ga4Sessions: 7910 },
-    { platform: 'YouTube', shortioHumanClicks: 3, ga4Sessions: 265 },
-  ],
-}
-
-// Referrer domain -> display platform name, shared with the social page's
-// platform mapping so attribution stays consistent across the dashboard.
-const REFERRER_TO_PLATFORM: Record<string, string> = {
-  't.co': 'Twitter',
-  'ir.ilmili.telegraph': 'Telegram',
-  'm.facebook.com': 'Facebook',
-  'lnkd.in': 'LinkedIn',
-  'l.instagram.com': 'Instagram',
-  'www.youtube.com': 'YouTube',
-}
-
-// GA4 `source` values that correspond to each social platform's attribution
-// bucket (lowercased for case-insensitive matching).
-const PLATFORM_BY_GA_SOURCE: Record<string, string> = {
-  twitter: 'Twitter',
-  't.co': 'Twitter',
-  x: 'Twitter',
-  telegram: 'Telegram',
-  facebook: 'Facebook',
-  'm.facebook.com': 'Facebook',
-  linkedin: 'LinkedIn',
-  instagram: 'Instagram',
-  youtube: 'YouTube',
-}
-
-/** Sums `event_count` off a `ga_events`-shaped result set, treating nulls as 0. */
-function sumEventCount(rows: { event_count: number | null }[] | null): number {
-  return (rows ?? []).reduce((sum, row) => sum + (row.event_count ?? 0), 0)
-}
-
-async function getFunnelData(searchParams?: { range?: string }): Promise<FunnelData> {
-  const supabase = createServiceClient()
-  const { startDate: since } = getDateWindow(searchParams)
-
-  // Stage 1: Social Discovery — Short.io's domain-wide click rollup row.
-  const stage1 = await supabase
-    .from('shortio_clicks')
-    .select('total_clicks')
-    .eq('link_id', 'domain_total')
-    .gte('date', since)
-
-  // Stage 2: Website Visit — GA4 web sessions arriving via social/referral.
-  const stage2 = await supabase
-    .from('ga_traffic')
-    .select('sessions')
-    .gte('date', since)
-    .in('channel', ['Social', 'Referral', 'Organic Social'])
-
-  // Stage 3: App Install — Firebase's automatic `first_open` event, which
-  // fires the first time the app is launched after install.
-  const stage3 = await supabase
-    .from('ga_events')
-    .select('event_count')
-    .eq('event_name', 'first_open')
-    .gte('date', since)
-
-  // Stage 4: Onboarding Started — new user first actions only (not screen views).
-  // Uses EW_ prefix events which are cross-platform action events, not SA_ screen views
-  // which fire for returning users too.
-  const stage4 = await supabase
-    .from('ga_events')
-    .select('event_count')
-    .gte('date', since)
-    .or(
-      'event_name.like.EW_ONBOARDING_LETS_GO%,event_name.like.EW_ONBOARDING_SOCIAL_SIGNUP%,event_name.like.EW_ONBOARDING_IMPORT_WALLET%,event_name.like.EW_ONBOARDING_IMPORT_BACKUP%,event_name.like.EW_ONBOARDING_IMPORT_PRIVATE%,event_name.like.EW_ONBOARDING_GUIDE_SKIP%'
-    )
-
-  // Stage 5: Wallet Created — reaching the main app dashboard requires a
-  // wallet to exist, so `SA_APP_DASHBOARD` is used as the wallet-created proxy.
-  const stage5 = await supabase
-    .from('ga_events')
-    .select('event_count')
-    .eq('event_name', 'SA_APP_DASHBOARD')
-    .gte('date', since)
-
-  // Stage 6: Onboarding Complete — the guided-onboarding completion event.
-  const stage6 = await supabase
-    .from('ga_events')
-    .select('event_count')
-    .eq('event_name', 'EW_ONBOARDING_GUIDE_COMPLETE')
-    .gte('date', since)
-
-  // Stage 7: Transactions — all send/swap/stake/store events across platforms.
-  // EA_SEND_* = Android, EI_SEND_* = iOS, EW_SEND_* = web/extension
-  // Dev team confirmed: SENTx, SWAPxLIFI, SAHAL_STAKEx, MRHB_STOREx, etc.
-  const [stage7a, stage7b, stage7c] = await Promise.all([
-    supabase.from('ga_events').select('event_count').gte('date', since).like('event_name', 'EA_SEND_%'),
-    supabase.from('ga_events').select('event_count').gte('date', since).like('event_name', 'EI_SEND_%'),
-    supabase.from('ga_events').select('event_count').gte('date', since).like('event_name', 'EW_SEND_%'),
-  ])
-  const stage7 = {
-    data: [...(stage7a.data ?? []), ...(stage7b.data ?? []), ...(stage7c.data ?? [])],
-  }
-
-  // Stage 8: Retained (30-day) — a full "first SA_APP_DASHBOARD + 30 days
-  // later" cohort query isn't expressible through supabase-js without a
-  // custom RPC, so this is simplified to `session_start` events in the last
-  // 7 days as a proxy for currently-active/returning users.
-  const stage8 = await supabase
-    .from('ga_events')
-    .select('event_count')
-    .eq('event_name', 'session_start')
-    .gte('date', getDateWindow({ range: '7d' }).startDate)
-
-  const socialDiscovery = (stage1.data ?? []).reduce(
-    (sum, r) => sum + (r.total_clicks ?? 0),
-    0
-  )
-  const websiteVisit = (stage2.data ?? []).reduce((sum, r) => sum + (r.sessions ?? 0), 0)
-  const appInstall = sumEventCount(stage3.data)
-  const onboardingStarted = sumEventCount(stage4.data)
-  const walletCreated = sumEventCount(stage5.data)
-  const onboardingComplete = sumEventCount(stage6.data)
-  const firstTransaction = sumEventCount(stage7.data)
-  const retained = sumEventCount(stage8.data)
-
-  // Per-stage fallback: an individual stage falls back to its own mock value
-  // whenever that query errored or genuinely summed to 0, so one missing
-  // event stream doesn't blank the entire funnel.
-  const resolvedStages: FunnelStageRow[] = [
-    {
-      name: 'Social Discovery',
-      users: !stage1.error && socialDiscovery > 0 ? socialDiscovery : STAGE_FALLBACKS.socialDiscovery,
-    },
-    {
-      name: 'Website Visit',
-      users: !stage2.error && websiteVisit > 0 ? websiteVisit : STAGE_FALLBACKS.websiteVisit,
-    },
-    {
-      name: 'App Install',
-      users: !stage3.error && appInstall > 0 ? appInstall : STAGE_FALLBACKS.appInstall,
-    },
-    {
-      name: 'Onboarding Started',
-      users:
-        !stage4.error && onboardingStarted > 0
-          ? onboardingStarted
-          : STAGE_FALLBACKS.onboardingStarted,
-    },
-    {
-      name: 'Wallet Created',
-      users: !stage5.error && walletCreated > 0 ? walletCreated : STAGE_FALLBACKS.walletCreated,
-    },
-    {
-      name: 'Onboarding Complete',
-      users:
-        !stage6.error && onboardingComplete > 0
-          ? onboardingComplete
-          : STAGE_FALLBACKS.onboardingComplete,
-    },
-    {
-      name: 'First Transaction',
-      users:
-        firstTransaction > 0
-          ? firstTransaction
-          : STAGE_FALLBACKS.firstTransaction,
-    },
-    {
-      name: 'Retained (30-day)',
-      users: !stage8.error && retained > 0 ? retained : STAGE_FALLBACKS.retained,
-    },
-  ]
-
-  // If literally every ga_events-backed stage came back empty/erroring (i.e.
-  // Firebase event sync hasn't produced any rows yet), fall back to the
-  // fully-mocked funnel so the UI still renders something coherent rather
-  // than a funnel that's all individually-substituted fallback numbers.
-  const allEventStagesEmpty =
-    appInstall === 0 &&
-    onboardingStarted === 0 &&
-    walletCreated === 0 &&
-    onboardingComplete === 0 &&
-    firstTransaction === 0 &&
-    retained === 0
-
-  const stages = allEventStagesEmpty ? MOCK_FUNNEL_DATA.stages : capToFunnelShape(resolvedStages)
-
-  // Social -> Website attribution: Short.io human clicks per platform vs.
-  // GA4 sessions recorded from the matching social source.
-  const clicksByReferrer = await supabase
-    .from('shortio_clicks')
-    .select('referrer, human_clicks')
-    .gte('date', since)
-
-  const sessionsBySource = await supabase
-    .from('ga_traffic')
-    .select('source, sessions')
-    .gte('date', since)
-    .eq('channel', 'social')
-
-  const humanClicksByPlatform = (clicksByReferrer.data ?? []).reduce<Record<string, number>>(
-    (acc, r) => {
-      const platform = r.referrer ? REFERRER_TO_PLATFORM[r.referrer] : undefined
-      if (platform) acc[platform] = (acc[platform] ?? 0) + (r.human_clicks ?? 0)
-      return acc
-    },
-    {}
-  )
-
-  const sessionsByPlatform = (sessionsBySource.data ?? []).reduce<Record<string, number>>(
-    (acc, r) => {
-      const platform = r.source ? PLATFORM_BY_GA_SOURCE[r.source.toLowerCase()] : undefined
-      if (platform) acc[platform] = (acc[platform] ?? 0) + (r.sessions ?? 0)
-      return acc
-    },
-    {}
-  )
-
-  const attributionPlatforms = Object.keys(REFERRER_TO_PLATFORM).map(
-    (referrer) => REFERRER_TO_PLATFORM[referrer]
-  )
-  const attribution: AttributionRow[] = attributionPlatforms.map((platform) => ({
-    platform,
-    shortioHumanClicks: humanClicksByPlatform[platform] ?? 0,
-    ga4Sessions: sessionsByPlatform[platform] ?? 0,
-  }))
-
-  const hasAttribution =
-    !clicksByReferrer.error &&
-    !sessionsBySource.error &&
-    attribution.some((a) => a.shortioHumanClicks > 0 || a.ga4Sessions > 0)
-
-  return {
-    stages,
-    attribution: hasAttribution ? attribution : MOCK_FUNNEL_DATA.attribution,
-  }
+/** Case-insensitive substring test against an event name. */
+function has(name: string, needle: string): boolean {
+  return name.indexOf(needle) !== -1
 }
 
 /**
- * Firebase event volume isn't guaranteed to strictly decrease stage over
- * stage the way store-funnel data does (e.g. `SA_APP_DASHBOARD` can fire
- * many times per user per day, while `first_open` only fires once ever per
- * device). Cap each stage at the previous stage's value so the funnel
- * visualization always narrows, never widens.
+ * Fetches all rows of a table for a window, paginating past Supabase's
+ * 1,000-row-per-request cap.
  */
-function capToFunnelShape(stages: FunnelStageRow[]): FunnelStageRow[] {
-  const capped: FunnelStageRow[] = []
-  let ceiling = Infinity
+async function fetchAll(
+  supabase: ReturnType<typeof createServiceClient>,
+  table: string,
+  columns: string,
+  since: string,
+  until: string,
+  maxPages = 40
+): Promise<Record<string, any>[]> {
+  const all: Record<string, any>[] = []
+  const PAGE = 1000
+  for (let p = 0; p < maxPages; p++) {
+    const { data, error } = await supabase
+      .from(table)
+      .select(columns)
+      .gte('date', since)
+      .lte('date', until)
+      .order('date', { ascending: true })
+      .range(p * PAGE, p * PAGE + PAGE - 1)
+    if (error) throw new Error(error.message)
+    const rows = (data ?? []) as Record<string, any>[]
+    all.push(...rows)
+    if (rows.length < PAGE) break
+  }
+  return all
+}
 
-  for (const stage of stages) {
-    const users = Math.min(stage.users, ceiling)
-    capped.push({ name: stage.name, users })
-    ceiling = users
+async function getJourneyData(searchParams?: { range?: string }): Promise<JourneyData> {
+  const rangeKey = (searchParams?.range as string) ?? '30d'
+  const empty: JourneyData = {
+    socialClicksTotal: 0,
+    socialClicksHuman: 0,
+    socialReferralSessions: 0,
+    webSourced: false,
+    milestones: [],
+    appSourced: false,
+    attribution: [],
+    ga4SocialSessions: 0,
   }
 
-  return capped
-}
+  try {
+    const supabase = createServiceClient()
+    const { startDate: since, endDate: until } = getDateWindow(searchParams)
 
-// ---------------------------------------------------------------------------
-// Derived metrics
-// ---------------------------------------------------------------------------
+    const [events, shortioRangeRes, sessionsRes, bySocialRes, gaSocialRes] = await Promise.all([
+      fetchAll(supabase, 'ga_events', 'date, event_name, event_count, users', since, until),
+      supabase
+        .from('shortio_clicks')
+        .select('total_clicks, human_clicks')
+        .eq('link_id', `range_${rangeKey}`)
+        .order('date', { ascending: false })
+        .limit(1),
+      supabase
+        .from('ga_traffic')
+        .select('sessions')
+        .gte('date', since)
+        .lte('date', until)
+        .in('channel', ['Organic Social', 'Referral']),
+      supabase
+        .from('shortio_clicks')
+        .select('date, link_id, referrer, total_clicks')
+        .in('link_id', [`by_social_${rangeKey}`, 'by_social'])
+        .order('date', { ascending: false }),
+      supabase
+        .from('ga_traffic')
+        .select('sessions')
+        .gte('date', since)
+        .lte('date', until)
+        .eq('channel', 'Organic Social'),
+    ])
 
-interface EnrichedStage extends FunnelStageRow {
-  percentageOfTotal: number
-  dropOffFromPrevious: number
-  usersProgressedToNext: number | null
-  conversionToNext: number | null
-}
+    // ---- Track B: app milestones (all-platform event rules) ----
+    const B = {
+      installs: { count: 0, users: 0 },
+      getStarted: { count: 0, users: 0 },
+      onboardingStarted: { count: 0, users: 0 },
+      onboardingComplete: { count: 0, users: 0 },
+      dashboard: { count: 0, users: 0 },
+      transaction: { count: 0, users: 0 },
+      returning: { count: 0, users: 0 },
+    }
+    for (const r of events) {
+      const n = String(r.event_name ?? '').toUpperCase()
+      const c = Number(r.event_count) || 0
+      const u = Number(r.users) || 0
+      const bump = (b: { count: number; users: number }) => {
+        b.count += c
+        b.users += u
+      }
+      if (n === 'FIRST_OPEN') bump(B.installs)
+      if (has(n, 'GET_STARTED')) bump(B.getStarted)
+      if (has(n, 'ONBOARDING_LETS_GO')) bump(B.onboardingStarted)
+      if (has(n, 'ONBOARDING_GUIDE_COMPLETE')) bump(B.onboardingComplete)
+      if (has(n, 'APP_DASHBOARD')) bump(B.dashboard)
+      if (has(n, 'SEND_MONEY') || has(n, '_SEND_') || has(n, 'SWAP') || has(n, 'SAHAL_RAMP')) bump(B.transaction)
+      if (n === 'SESSION_START') bump(B.returning)
+    }
 
-function enrichStages(stages: FunnelStageRow[]): EnrichedStage[] {
-  const topOfFunnel = stages[0]?.users ?? 1
+    const milestones: Milestone[] = [
+      { key: 'installs', label: 'App installs (first open)', basis: 'first_open', ...B.installs },
+      { key: 'getStarted', label: 'Reached Get Started', basis: '*_GET_STARTED screens', ...B.getStarted },
+      { key: 'onboardingStarted', label: 'Onboarding started', basis: '*_ONBOARDING_LETS_GO', ...B.onboardingStarted },
+      { key: 'onboardingComplete', label: 'Onboarding completed', basis: '*_ONBOARDING_GUIDE_COMPLETE', ...B.onboardingComplete },
+      { key: 'dashboard', label: 'Reached dashboard', basis: '*_APP_DASHBOARD screens', ...B.dashboard },
+      { key: 'transaction', label: 'Transaction activity', basis: 'send / swap / ramp events (incl. in-flow screens)', ...B.transaction },
+      { key: 'returning', label: 'Returning sessions', basis: 'session_start', ...B.returning },
+    ]
+    const appSourced = events.length > 0 && milestones.some((m) => m.count > 0)
 
-  return stages.map((stage, index) => {
-    const previous = stages[index - 1]
-    const next = stages[index + 1]
+    // ---- Track A: web acquisition ----
+    const rangeRow = shortioRangeRes.data?.[0] as { total_clicks: number; human_clicks: number } | undefined
+    const socialClicksTotal = Number(rangeRow?.total_clicks) || 0
+    const socialClicksHuman = Number(rangeRow?.human_clicks) || 0
+    const socialReferralSessions = (sessionsRes.data ?? []).reduce(
+      (s: number, r: any) => s + (Number(r.sessions) || 0),
+      0
+    )
+    const webSourced = rangeRow !== undefined || socialReferralSessions > 0
 
-    const percentageOfTotal = (stage.users / topOfFunnel) * 100
-    const dropOffFromPrevious = previous
-      ? ((previous.users - stage.users) / previous.users) * 100
-      : 0
-    const conversionToNext = next ? (next.users / stage.users) * 100 : null
-    const usersProgressedToNext = next ? next.users : null
+    // ---- Attribution: Short.io per-platform clicks (latest snapshot) ----
+    const socRows = (bySocialRes.data ?? []) as any[]
+    const latestDate = socRows.reduce((m, r) => (String(r.date) > m ? String(r.date) : m), '')
+    const perRange = socRows.filter((r) => r.date === latestDate && r.link_id === `by_social_${rangeKey}`)
+    const fallback = socRows.filter((r) => r.date === latestDate && r.link_id === 'by_social')
+    const chosen = perRange.length > 0 ? perRange : fallback
+    const byPlatform = new Map<string, number>()
+    for (const r of chosen) {
+      const name = String(r.referrer ?? '').trim()
+      if (!name) continue
+      byPlatform.set(name, (byPlatform.get(name) ?? 0) + (Number(r.total_clicks) || 0))
+    }
+    const attribution = Array.from(byPlatform.entries())
+      .map(([platform, clicks]) => ({ platform, clicks }))
+      .sort((a, b) => b.clicks - a.clicks)
+
+    const ga4SocialSessions = (gaSocialRes.data ?? []).reduce(
+      (s: number, r: any) => s + (Number(r.sessions) || 0),
+      0
+    )
 
     return {
-      ...stage,
-      percentageOfTotal,
-      dropOffFromPrevious,
-      usersProgressedToNext,
-      conversionToNext,
+      socialClicksTotal,
+      socialClicksHuman,
+      socialReferralSessions,
+      webSourced,
+      milestones,
+      appSourced,
+      attribution,
+      ga4SocialSessions,
     }
-  })
-}
-
-interface DropOffPoint {
-  fromStage: string
-  toStage: string
-  dropOffPct: number
-  usersLost: number
-  insight: string
-}
-
-// Actionable copy per (fromStage -> toStage) transition. Falls back to a
-// generic message if a transition isn't explicitly covered here.
-const DROP_OFF_INSIGHTS: Record<string, string> = {
-  'Social Discovery->Website Visit':
-    'Social posts and bio links aren’t converting into site visits — tighten UTM-tagged CTAs and make the link-in-bio destination match the promised content.',
-  'Website Visit->App Install':
-    'Visitors aren’t converting to installs — review the app-download CTA placement and store-listing appeal linked from the website.',
-  'App Install->Onboarding Started':
-    'Installs aren’t opening onboarding — check for first-launch friction (permissions prompts, splash/load time) before `SA_GET_STARTED`/`EW_ONBOARDING_LETS_GO` fires.',
-  'Onboarding Started->Wallet Created':
-    'Users start onboarding but don’t reach the dashboard — audit the wallet-creation flow (KYC steps, seed phrase, form length) for drop-off points.',
-  'Wallet Created->Onboarding Complete':
-    'Wallets are created but users don’t finish the guided walkthrough — consider shortening `EW_ONBOARDING_GUIDE_COMPLETE`’s remaining steps or adding a skip-and-remind option.',
-  'Onboarding Complete->First Transaction':
-    'Onboarded users aren’t transacting — a first-transaction incentive or guided “make your first transfer” nudge could close this gap.',
-  'First Transaction->Retained (30-day)':
-    'Users transact once but don’t come back — lifecycle emails/push notifications and recurring-use features (Sahal Earn, Sahal Give) may help retention.',
-}
-
-function buildDropOffPoints(stages: EnrichedStage[]): DropOffPoint[] {
-  const transitions: DropOffPoint[] = []
-
-  for (let i = 1; i < stages.length; i++) {
-    const from = stages[i - 1]
-    const to = stages[i]
-    const key = `${from.name}->${to.name}`
-
-    transitions.push({
-      fromStage: from.name,
-      toStage: to.name,
-      dropOffPct: to.dropOffFromPrevious,
-      usersLost: from.users - to.users,
-      insight:
-        DROP_OFF_INSIGHTS[key] ??
-        `${to.dropOffFromPrevious.toFixed(0)}% drop from ${from.name} to ${to.name} — investigate this step for friction.`,
-    })
+  } catch {
+    return empty
   }
-
-  return transitions.sort((a, b) => b.dropOffPct - a.dropOffPct)
 }
 
-const stageColumns: DataTableColumn[] = [
-  { key: 'stage', label: 'Stage', sortable: true },
-  { key: 'usersEntered', label: 'Users Entered', sortable: true, align: 'right' },
-  { key: 'usersProgressed', label: 'Users Progressed', sortable: true, align: 'right' },
-  { key: 'conversionRate', label: 'Conversion Rate', sortable: true, align: 'right' },
-  { key: 'dropOffRate', label: 'Drop-off Rate', sortable: true, align: 'right' },
+const RANGE_LABELS: Record<string, string> = {
+  today: 'Today',
+  yesterday: 'Yesterday',
+  '7d': 'Last 7 Days',
+  '30d': 'Last 30 Days',
+  '90d': 'Last 90 Days',
+}
+
+const milestoneColumns: DataTableColumn[] = [
+  { key: 'milestone', label: 'Milestone', sortable: false },
+  { key: 'users', label: 'Active Users', sortable: true, align: 'right' },
+  { key: 'events', label: 'Events', sortable: true, align: 'right' },
+  { key: 'basis', label: 'Event basis', sortable: false },
 ]
 
 export default async function FunnelPage({
@@ -427,108 +247,135 @@ export default async function FunnelPage({
 }: {
   searchParams: { range?: string }
 }) {
-  const data = await getFunnelData(searchParams)
-  const enrichedStages = enrichStages(data.stages)
-  const topDropOffs = buildDropOffPoints(enrichedStages).slice(0, 3)
+  const data = await getJourneyData(searchParams)
+  const rangeLabel = RANGE_LABELS[searchParams?.range ?? '30d'] ?? 'Last 30 Days'
 
-  const funnelSteps: FunnelChartStep[] = enrichedStages.map((stage) => ({
-    name: stage.name,
-    value: stage.users,
-    percentage: stage.percentageOfTotal,
-    dropOff: stage.dropOffFromPrevious,
+  const notLive: string[] = []
+  if (!data.webSourced) notLive.push('Web acquisition (Short.io not synced for this range)')
+  if (!data.appSourced) notLive.push('App engagement (no Firebase app events for this range)')
+
+  const appBarData: BarChartDataPoint[] = data.milestones.map((m) => ({ label: m.label, value: m.users }))
+
+  const milestoneRows = data.milestones.map((m) => ({
+    milestone: m.label,
+    users: formatNumber(m.users),
+    events: formatNumber(m.count),
+    basis: m.basis,
   }))
 
-  const stageRows = enrichedStages.map((stage) => ({
-    stage: stage.name,
-    usersEntered: formatNumber(stage.users),
-    usersProgressed:
-      stage.usersProgressedToNext !== null ? formatNumber(stage.usersProgressedToNext) : '— (final stage)',
-    conversionRate: stage.conversionToNext !== null ? formatPercent(stage.conversionToNext) : '—',
-    dropOffRate: formatPercent(stage.dropOffFromPrevious),
-  }))
-
-  const attributionChartData: BarChartDataPoint[] = data.attribution.map((row) => ({
-    label: row.platform,
-    value: row.shortioHumanClicks,
-    secondaryValue: row.ga4Sessions,
-  }))
+  const attributionBar: BarChartDataPoint[] = data.attribution.map((a) => ({ label: a.platform, value: a.clicks }))
 
   return (
     <div>
-      <Header title="User Journey & Funnel" />
+      <Header title="User Journey" />
 
-      {/* Main funnel visualization */}
-      <div className="mb-6">
-        <FunnelChart steps={funnelSteps} title="Conversion Funnel: Discovery to Retention" />
-      </div>
-
-      {/* Biggest drop-offs + stage conversion table */}
-      <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* Biggest Drop-off Points */}
-        <div className="rounded-xl bg-mrhb-white p-5 shadow-sm">
-          <h3 className="mb-4 text-base font-semibold text-mrhb-dark">
-            Biggest Drop-off Points
-          </h3>
-          <ul className="space-y-4">
-            {topDropOffs.map((point, index) => (
-              <li
-                key={`${point.fromStage}-${point.toStage}`}
-                className="rounded-lg border border-red-200 bg-red-50 p-4"
-              >
-                <div className="flex items-start gap-3">
-                  <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-red-500 text-xs font-bold text-white">
-                    {index + 1}
-                  </span>
-                  <div className="flex-1">
-                    <div className="flex flex-wrap items-baseline justify-between gap-2">
-                      <p className="text-sm font-semibold text-mrhb-dark">
-                        {point.fromStage} &rarr; {point.toStage}
-                      </p>
-                      <span className="whitespace-nowrap text-sm font-bold text-red-600">
-                        -{point.dropOffPct.toFixed(1)}%
-                      </span>
-                    </div>
-                    <p className="mt-1 text-xs text-mrhb-dark/60">
-                      {formatNumber(point.usersLost)} users lost at this step
-                    </p>
-                    <p className="mt-2 text-sm text-mrhb-dark/80">{point.insight}</p>
-                  </div>
-                </div>
-              </li>
+      {/* Non-live sources are always disclosed — mock is never shown as live */}
+      {notLive.length > 0 && (
+        <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4">
+          <p className="text-sm font-semibold text-amber-800">Some sources are not live for this range</p>
+          <ul className="mt-1 list-disc pl-5 text-xs text-amber-700">
+            {notLive.map((m) => (
+              <li key={m}>{m}</li>
             ))}
           </ul>
         </div>
+      )}
 
-        {/* Stage Conversion Rates table */}
-        <DataTable
-          columns={stageColumns}
-          data={stageRows}
-          title="Stage Conversion Rates"
-          emptyMessage="No funnel data available for this period."
+      {/* How to read this — the tracks are NOT one tracked cohort */}
+      <div className="mb-6 rounded-lg border border-mrhb-blue-light bg-mrhb-blue-light/30 p-4">
+        <p className="text-sm font-medium text-mrhb-dark">How to read this</p>
+        <p className="mt-1 text-xs text-mrhb-dark/70">
+          This is a cross-source journey, <strong>not a single tracked cohort</strong>. Web acquisition
+          (Short.io + GA4 web) and app engagement (Firebase, all platforms) are measured independently over{' '}
+          {rangeLabel.toLowerCase()}. App milestones reflect the <strong>whole active user base&apos;s</strong>{' '}
+          events in the period — not only users who installed in this window — so later milestones can exceed
+          installs. &ldquo;Active Users&rdquo; is GA4&apos;s per-event user metric summed over days (a ceiling,
+          not a unique-in-period count); &ldquo;Events&rdquo; is the raw event count.
+        </p>
+      </div>
+
+      {/* Track A — Web acquisition */}
+      <h2 className="mb-3 text-lg font-semibold text-mrhb-dark">
+        Web Acquisition <span className="text-xs font-normal text-mrhb-dark/40">&middot; {rangeLabel}</span>
+      </h2>
+      <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <KPICard
+          title="Social Link Clicks"
+          value={formatNumber(data.socialClicksTotal)}
+          iconName="mouse-pointer-click"
+          tooltip="Total clicks on Short.io social links for this range — authoritative per-range figure (matches the Social page)"
+        />
+        <KPICard
+          title="Social Clicks (Human)"
+          value={formatNumber(data.socialClicksHuman)}
+          iconName="users"
+          tooltip="Real-person clicks (bots excluded) on Short.io social links, per Short.io's own split"
+        />
+        <KPICard
+          title="Social + Referral Sessions"
+          value={formatNumber(data.socialReferralSessions)}
+          iconName="share2"
+          tooltip="GA4 website sessions in the 'Organic Social' + 'Referral' channels for this range"
         />
       </div>
 
-      {/* Social -> Website Attribution */}
-      <div className="mb-2">
-        <h2 className="mb-1 text-lg font-semibold text-mrhb-dark">
-          Social &rarr; Website Attribution
-        </h2>
-        <p className="mb-4 text-sm text-mrhb-dark/60">
-          Short.io human clicks by platform (from mrhbnetwork.short.gy UTM links) compared
-          against GA4 sessions recorded from the matching social source, showing how much
-          on-site traffic each platform&apos;s clicks actually drive.
-        </p>
+      {/* Track B — App engagement */}
+      <h2 className="mb-1 text-lg font-semibold text-mrhb-dark">
+        App Engagement <span className="text-xs font-normal text-mrhb-dark/40">&middot; Firebase, all platforms &middot; {rangeLabel}</span>
+      </h2>
+      <p className="mb-4 text-xs text-mrhb-dark/50">
+        Milestones across the active user base — shown side by side, not as sequential conversions.
+      </p>
+      <div className="mb-6">
+        <BarChart
+          data={appBarData}
+          title="Active Users by App Milestone"
+          color="#01A6FA"
+          valueLabel="Active Users"
+          height={360}
+          layout="horizontal"
+        />
       </div>
-      <BarChart
-        data={attributionChartData}
-        title="Short.io Human Clicks vs. GA4 Sessions by Platform"
-        color="#01A6FA"
-        secondaryColor="#E5B897"
-        valueLabel="Short.io Human Clicks"
-        secondaryValueLabel="GA4 Sessions"
-        height={340}
-        layout="vertical"
-      />
+      <div className="mb-8">
+        <DataTable
+          columns={milestoneColumns}
+          data={milestoneRows}
+          title="App Milestones — Users, Events & Source"
+          emptyMessage="No Firebase app events for this period."
+        />
+      </div>
+
+      {/* Attribution */}
+      <h2 className="mb-1 text-lg font-semibold text-mrhb-dark">
+        Social Attribution <span className="text-xs font-normal text-mrhb-dark/40">&middot; {rangeLabel}</span>
+      </h2>
+      <p className="mb-4 text-sm text-mrhb-dark/60">
+        Short.io link clicks by platform (reliable). GA4 social sessions are shown only as an aggregate:
+        Google reports these under a generic &ldquo;social&rdquo; source, so a trustworthy per-platform GA4
+        breakdown isn&apos;t available.
+      </p>
+      <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
+        <div className="lg:col-span-2">
+          <BarChart
+            data={attributionBar}
+            title="Short.io Clicks by Platform"
+            color="#01A6FA"
+            valueLabel="Total Clicks"
+            height={320}
+            layout="horizontal"
+          />
+        </div>
+        <div className="flex">
+          <div className="w-full">
+            <KPICard
+              title="GA4 Social Sessions (aggregate)"
+              value={formatNumber(data.ga4SocialSessions)}
+              iconName="share2"
+              tooltip="All GA4 website sessions in the 'Organic Social' channel for this range. Not broken out per platform because GA4's source for these is the generic 'social'."
+            />
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
