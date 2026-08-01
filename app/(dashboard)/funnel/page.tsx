@@ -5,33 +5,25 @@ import KPICard from '@/components/cards/KPICard'
 import { formatNumber } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
-import {
-  Eye,
-  MousePointerClick,
-  Download,
-  LayoutDashboard,
-  ArrowLeftRight,
-  DollarSign,
-  Info,
-  type LucideIcon,
-} from 'lucide-react'
+import { Info } from 'lucide-react'
 
 // ---------------------------------------------------------------------------
-// User Journey — a 6-stage acquisition→activation→revenue funnel:
-//   Impressions → Clicks → App Installs → 1st Dashboard → 1st Transaction → Revenue
+// User Journey — a 6-stage acquisition→activation→revenue funnel, drawn as the
+// classic inverted-triangle funnel (stacked trapezoids tapering downward).
 //
 // Each stage reads its AUTHORITATIVE source. The three app-event stages
 // (Installs / 1st Dashboard / 1st Transaction) are driven by admin-configured
 // `tracked_events` rows (funnel_stage + event_name); if none are configured (or
 // the 002 migration isn't applied yet) they fall back to built-in event rules.
 //
-// HONESTY: stages come from DIFFERENT sources and populations — this is a
-// cross-source journey, NOT a single tracked cohort (dashboard/transaction
-// count the whole active base, so they can exceed installs). "1st Dashboard/
-// Transaction" are approximated as users-who-reached until dedicated first-time
-// events exist. Sources not yet connected (app-store & social impressions,
-// revenue) render as "Not connected" — never faked. The magnitude fill bar
-// under each stage is proportional to its value, so it never misrepresents.
+// HONESTY: stages come from DIFFERENT sources and populations — a cross-source
+// journey, NOT a single tracked cohort (dashboard/transaction count the whole
+// active base, so they can exceed installs). "1st Dashboard/Transaction" are
+// approximated as users-who-reached until dedicated first-time events exist.
+// Sources not yet connected (app-store & social impressions, revenue) render as
+// "Not connected" — never faked. The triangle WIDTH is illustrative of stage
+// order (a funnel shape); the true value is printed on each band and the exact
+// figures + sources are in the Stage Detail table below.
 // ---------------------------------------------------------------------------
 
 interface StageResult {
@@ -96,7 +88,6 @@ async function getJourneyData(searchParams?: { range?: string }): Promise<Journe
     const supabase = createServiceClient()
     const { startDate: since, endDate: until } = getDateWindow(searchParams)
 
-    // --- Admin config: which event_names feed each app-event stage ---
     const configByStage: Record<string, Set<string>> = {
       'App Installs': new Set<string>(),
       '1st Dashboard': new Set<string>(),
@@ -118,7 +109,7 @@ async function getJourneyData(searchParams?: { range?: string }): Promise<Journe
         }
       }
     } catch {
-      // funnel_stage column absent → leave config empty (defaults apply)
+      // funnel_stage column absent → defaults apply
     }
 
     const [events, gscRows, shortioRes, revenueRes, bySocialRes, gaSocialRes] = await Promise.all([
@@ -172,42 +163,12 @@ async function getJourneyData(searchParams?: { range?: string }): Promise<Journe
     const revenueValue = revenueRows.reduce((s, r) => s + (Number(r.metric_value) || 0), 0)
 
     const stages: StageResult[] = [
-      {
-        name: 'Impressions',
-        value: webImpressions,
-        note: 'Web (Search Console). Social + app-store impressions not connected.',
-        sourced: webImpressions > 0,
-      },
-      {
-        name: 'Clicks',
-        value: webClicks + socialHuman,
-        note: 'Web search clicks + human social clicks (Short.io).',
-        sourced: webClicks + socialHuman > 0,
-      },
-      {
-        name: 'App Installs',
-        value: appUsers['App Installs'],
-        note: configured ? 'First opens · admin-configured events' : 'First opens (first_open) · default',
-        sourced: appUsers['App Installs'] > 0,
-      },
-      {
-        name: '1st Dashboard',
-        value: appUsers['1st Dashboard'],
-        note: 'Users who reached dashboard (approx.)',
-        sourced: appUsers['1st Dashboard'] > 0,
-      },
-      {
-        name: '1st Transaction',
-        value: appUsers['1st Transaction'],
-        note: 'Users who transacted — send / swap / ramp (approx.)',
-        sourced: appUsers['1st Transaction'] > 0,
-      },
-      {
-        name: 'Revenue',
-        value: revenueValue,
-        note: revenueConfigured ? 'In-app revenue' : 'Needs Firebase revenue events',
-        sourced: revenueConfigured,
-      },
+      { name: 'Impressions', value: webImpressions, note: 'Web (Search Console). Social + app-store impressions not connected.', sourced: webImpressions > 0 },
+      { name: 'Clicks', value: webClicks + socialHuman, note: 'Web search clicks + human social clicks (Short.io).', sourced: webClicks + socialHuman > 0 },
+      { name: 'App Installs', value: appUsers['App Installs'], note: configured ? 'First opens · admin-configured events' : 'First opens (first_open) · default', sourced: appUsers['App Installs'] > 0 },
+      { name: '1st Dashboard', value: appUsers['1st Dashboard'], note: 'Users who reached dashboard (approx.)', sourced: appUsers['1st Dashboard'] > 0 },
+      { name: '1st Transaction', value: appUsers['1st Transaction'], note: 'Users who transacted — send / swap / ramp (approx.)', sourced: appUsers['1st Transaction'] > 0 },
+      { name: 'Revenue', value: revenueValue, note: revenueConfigured ? 'In-app revenue' : 'Needs Firebase revenue events', sourced: revenueConfigured },
     ]
 
     const socRows = (bySocialRes.data ?? []) as any[]
@@ -240,15 +201,15 @@ const RANGE_LABELS: Record<string, string> = {
   '90d': 'Last 90 Days',
 }
 
-// Visual identity per stage (icon + accent color). Connected stages use their
-// accent; not-connected stages are rendered muted regardless.
-const STAGE_META: Record<string, { icon: LucideIcon; from: string; to: string }> = {
-  Impressions: { icon: Eye, from: '#01A6FA', to: '#38BDF8' },
-  Clicks: { icon: MousePointerClick, from: '#0E8BE6', to: '#22A6F0' },
-  'App Installs': { icon: Download, from: '#5566E0', to: '#7C8CF0' },
-  '1st Dashboard': { icon: LayoutDashboard, from: '#8B5CD6', to: '#A87BEA' },
-  '1st Transaction': { icon: ArrowLeftRight, from: '#E08A2B', to: '#F0A94E' },
-  Revenue: { icon: DollarSign, from: '#12B76A', to: '#3AD98C' },
+// Smooth pink→navy colour ramp across the funnel (from/to = subtle per-band
+// gradient). Connected stages use their colour; not-connected renders muted.
+const STAGE_COLORS: Record<string, { from: string; to: string }> = {
+  Impressions: { from: '#F0468C', to: '#F76FA8' },
+  Clicks: { from: '#D94BA6', to: '#E86FBD' },
+  'App Installs': { from: '#B14FC4', to: '#C56FD8' },
+  '1st Dashboard': { from: '#8257D6', to: '#9B79E6' },
+  '1st Transaction': { from: '#5563DE', to: '#7C88EE' },
+  Revenue: { from: '#2E3A8C', to: '#4756B0' },
 }
 
 const stageColumns: DataTableColumn[] = [
@@ -265,15 +226,14 @@ export default async function FunnelPage({
 }) {
   const data = await getJourneyData(searchParams)
   const rangeLabel = RANGE_LABELS[searchParams?.range ?? '30d'] ?? 'Last 30 Days'
-
   const topValue = data.stages[0]?.value ?? 0
-  // Cone width uses a compressed (sqrt) scale so the funnel tapers smoothly
-  // instead of collapsing to slivers when one stage (Impressions) dwarfs the
-  // rest — while still being volume-driven (never faked). Min 30% keeps every
-  // stage legible.
-  const maxSqrt = data.stages.reduce((m, s) => Math.max(m, s.sourced ? Math.sqrt(s.value) : 0), 0) || 1
-  const coneWidth = (s: StageResult): number =>
-    s.sourced && s.value > 0 ? Math.max(30, Math.round((Math.sqrt(s.value) / maxSqrt) * 100)) : 30
+
+  // Inverted-triangle geometry: each band is a trapezoid whose top edge is the
+  // previous boundary width and bottom edge the next, tapering 100% → TIP%.
+  const n = data.stages.length
+  const TOP = 100
+  const TIP = 16
+  const boundary = (k: number): number => (n <= 0 ? TOP : TOP - (k * (TOP - TIP)) / n)
 
   const stageRows = data.stages.map((s) => ({
     stage: s.name,
@@ -292,60 +252,52 @@ export default async function FunnelPage({
       <div className="mb-6 overflow-hidden rounded-2xl bg-mrhb-white shadow-sm ring-1 ring-mrhb-warm-grey/10">
         <div className="flex flex-col gap-1 border-b border-mrhb-warm-grey/10 bg-gradient-to-r from-mrhb-blue/5 to-transparent px-6 py-5">
           <h2 className="text-lg font-semibold text-mrhb-dark">Acquisition → Revenue</h2>
-          <p className="text-xs text-mrhb-dark/50">{rangeLabel} · bar width ∝ volume (compressed scale)</p>
+          <p className="text-xs text-mrhb-dark/50">{rangeLabel} · funnel shape shows stage order; numbers are exact</p>
         </div>
 
-        <div className="px-4 py-6 sm:px-6">
+        <div className="px-4 py-8 sm:px-6">
           {data.stages.length === 0 ? (
             <p className="py-10 text-center text-sm text-mrhb-dark/50">No journey data for this period.</p>
           ) : (
-            <div className="mx-auto flex max-w-2xl flex-col items-stretch gap-2.5">
+            <div className="mx-auto flex w-full max-w-xl flex-col gap-[3px]">
               {data.stages.map((stage, index) => {
-                const meta = STAGE_META[stage.name] ?? { icon: Eye, from: '#01A6FA', to: '#38BDF8' }
-                const Icon = meta.icon
-                const width = coneWidth(stage)
+                const colors = STAGE_COLORS[stage.name] ?? { from: '#5563DE', to: '#7C88EE' }
+                const topW = boundary(index)
+                const botW = boundary(index + 1)
+                const leftTop = (100 - topW) / 2
+                const rightTop = (100 + topW) / 2
+                const leftBot = (100 - botW) / 2
+                const rightBot = (100 + botW) / 2
+                const clip = `polygon(${leftTop}% 0, ${rightTop}% 0, ${rightBot}% 100%, ${leftBot}% 100%)`
+                const textW = Math.max(30, (topW + botW) / 2 - 4)
                 const shareOfTop = stage.sourced && topValue > 0 ? (stage.value / topValue) * 100 : null
 
                 return (
-                  <div key={stage.name} className="flex flex-col items-center">
-                    {/* Label above the bar */}
-                    <div className="mb-1 flex items-center gap-1.5">
-                      <span
-                        className="flex h-5 w-5 items-center justify-center rounded-md text-white"
-                        style={
-                          stage.sourced
-                            ? { backgroundImage: `linear-gradient(135deg, ${meta.from}, ${meta.to})` }
-                            : { backgroundColor: '#C9C0B4' }
-                        }
-                      >
-                        <Icon size={12} />
-                      </span>
-                      <span className="text-xs font-semibold text-mrhb-dark/70 sm:text-sm">
-                        {index + 1}. {stage.name}
-                      </span>
-                      {shareOfTop !== null && (
-                        <span className="text-[10px] font-medium text-mrhb-dark/35">
-                          · {shareOfTop.toFixed(shareOfTop >= 10 ? 0 : 1)}% of top
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Cone bar (centered; width ∝ compressed volume) */}
+                  <div key={stage.name} className="relative h-[74px] w-full">
+                    {/* Trapezoid band */}
                     <div
-                      className={`flex min-h-[56px] w-full items-center justify-center rounded-xl px-4 text-center shadow-sm transition-all duration-500 ${
-                        stage.sourced ? 'text-white' : 'border-2 border-dashed border-mrhb-warm-grey/50 text-mrhb-dark/45'
-                      }`}
-                      style={
-                        stage.sourced
-                          ? { maxWidth: `${width}%`, backgroundImage: `linear-gradient(135deg, ${meta.from}, ${meta.to})` }
-                          : { maxWidth: `${width}%` }
-                      }
-                    >
-                      {stage.sourced ? (
-                        <span className="text-xl font-bold leading-none sm:text-2xl">{formatNumber(stage.value)}</span>
-                      ) : (
-                        <span className="text-xs font-semibold">Not connected</span>
-                      )}
+                      className="absolute inset-0"
+                      style={{
+                        clipPath: clip,
+                        WebkitClipPath: clip,
+                        backgroundImage: stage.sourced
+                          ? `linear-gradient(135deg, ${colors.from}, ${colors.to})`
+                          : 'linear-gradient(135deg, #CFC7BB, #DDD6CB)',
+                      }}
+                    />
+                    {/* Centered label (constrained to the band so text stays on colour) */}
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="text-center leading-tight text-white" style={{ width: `${textW}%` }}>
+                        <div className="text-sm font-semibold drop-shadow-sm sm:text-base">{stage.name}</div>
+                        <div className="text-xs font-bold text-white/95 drop-shadow-sm">
+                          {stage.sourced ? formatNumber(stage.value) : 'Not connected'}
+                          {shareOfTop !== null && (
+                            <span className="ml-1 font-medium text-white/70">
+                              · {shareOfTop.toFixed(shareOfTop >= 10 ? 0 : 1)}%
+                            </span>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 )
@@ -359,11 +311,12 @@ export default async function FunnelPage({
       <div className="mb-8 flex items-start gap-2.5 rounded-xl border border-mrhb-blue-light bg-mrhb-blue-light/20 p-4">
         <Info size={16} className="mt-0.5 flex-shrink-0 text-mrhb-blue" />
         <p className="text-xs leading-relaxed text-mrhb-dark/70">
-          This is a <strong>cross-source journey, not a single tracked cohort</strong>: stages come from different
-          sources and user populations, so app stages (which count the whole active base) can exceed installs.
-          &ldquo;1st Dashboard/Transaction&rdquo; are approximated as users-who-reached until dedicated first-time
-          events exist. Stages marked <strong>Not connected</strong> — app-store &amp; social impressions and revenue —
-          are awaiting a data source and are never estimated. App stages are driven by{' '}
+          The triangle shows the <strong>stage order</strong> of the journey; the width is illustrative, not to
+          scale — the exact figure is printed on each band (and in the table below). This is a{' '}
+          <strong>cross-source journey, not a single tracked cohort</strong>: app stages count the whole active base,
+          so they can exceed installs. &ldquo;1st Dashboard/Transaction&rdquo; are approximated as users-who-reached
+          until dedicated first-time events exist. Stages marked <strong>Not connected</strong> (app-store &amp;
+          social impressions, revenue) await a data source and are never estimated. App stages are driven by{' '}
           {data.configured ? 'your Admin event configuration' : 'built-in defaults (configure them in Admin)'}.
         </p>
       </div>
