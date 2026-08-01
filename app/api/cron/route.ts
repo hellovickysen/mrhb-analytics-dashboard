@@ -1,27 +1,30 @@
 /**
  * GET /api/cron
  *
- * Vercel cron endpoint — invoked automatically on the schedule declared in
- * vercel.json (`0 * / 6 * * *`, i.e. every 6 hours at 00:00 / 06:00 / 12:00 /
- * 18:00 UTC). Pulls the last 30 days of data from all 5 upstream sources and
- * upserts it into Supabase via {@link runFullIngestion}.
+ * Vercel cron endpoint — invoked automatically once daily on the schedule
+ * declared in vercel.json (`0 0 * * *`, i.e. 00:00 UTC). Pulls the last 30
+ * days of data from all 5 upstream sources and upserts it into Supabase via
+ * {@link runFullIngestion}.
+ *
+ * NOTE: kept at once-per-day because Vercel's Hobby plan limits cron frequency
+ * to at most daily — a more frequent schedule makes Vercel reject the whole
+ * deployment (this previously froze production on a stale build).
  *
  * SELF-HEALING / FRESHNESS GATE
  * -----------------------------
- * The cron fires every 6 hours, but a full ingestion is expensive and only
- * needs to happen roughly once a day. So before ingesting, this route checks
- * `data_sync_log` for the most recent SUCCESSFUL sync:
+ * Before ingesting, this route checks `data_sync_log` for the most recent
+ * SUCCESSFUL sync:
  *
  *   - If a successful sync completed within the last {@link STALE_AFTER_MS}
- *     (~20 h) → data is fresh, SKIP (cheap no-op). This is why only one of the
- *     four daily ticks — the one ~24 h after the previous run, i.e. midnight —
- *     actually does work; the others return `skipped: true`.
+ *     (~20 h) → data is fresh, SKIP (cheap no-op). On the once-daily schedule
+ *     the run is normally ~24 h after the previous one, so it syncs; the skip
+ *     branch only trips if a manual Sync ran within the last ~20 h.
  *
  *   - If the freshness check itself ERRORS (e.g. the Supabase project is
  *     paused / unreachable) → we do NOT attempt an ingestion that would just
- *     fail. We return 503 and let the next 6-hourly tick retry. This is the
+ *     fail. We return 503 and let the next daily run retry. This is the
  *     self-healing behaviour: pause the DB for a day or a week, and the FIRST
- *     tick after it's back online detects the stale data and re-syncs
+ *     run after it's back online detects the stale data and re-syncs
  *     automatically, with no manual trigger. A 30-day ingestion window means
  *     gaps of up to ~30 days are fully backfilled in that single catch-up run.
  *
@@ -50,8 +53,8 @@ import { createServiceClient } from '@/lib/supabase/server'
 export const maxDuration = 300
 
 // A sync is considered "fresh" if a successful run completed within this
-// window. 20 h < the 24 h gap between the midnight run and the previous day's
-// run, so the midnight tick always re-syncs while the 06/12/18 ticks skip.
+// window. 20 h < the 24 h gap between daily runs, so the daily run always
+// re-syncs; the skip branch only trips if a manual Sync ran within ~20 h.
 const STALE_AFTER_MS = 20 * 60 * 60 * 1000
 
 /**
