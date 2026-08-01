@@ -46,6 +46,21 @@ function getUserName(): string {
   return match ? decodeURIComponent(match[1]) : ''
 }
 
+/** Human-friendly relative time from an ISO timestamp (e.g. "5 minutes ago"). */
+function relTime(iso: string | null): string {
+  if (!iso) return 'no syncs yet'
+  const t = new Date(iso).getTime()
+  if (!Number.isFinite(t)) return '—'
+  const seconds = Math.max(0, Math.floor((Date.now() - t) / 1000))
+  if (seconds < 60) return 'just now'
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} minute${minutes > 1 ? 's' : ''} ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} hour${hours > 1 ? 's' : ''} ago`
+  const days = Math.floor(hours / 24)
+  return `${days} day${days > 1 ? 's' : ''} ago`
+}
+
 interface SidebarProps {
   onClose?: () => void
 }
@@ -54,11 +69,30 @@ export default function Sidebar({ onClose }: SidebarProps) {
   const pathname = usePathname()
   const router = useRouter()
   const [isSyncing, setIsSyncing] = useState(false)
-  const [lastSynced, setLastSynced] = useState('2 minutes ago')
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null)
+  const [syncLoaded, setSyncLoaded] = useState(false)
+  const [syncFailed, setSyncFailed] = useState(false)
   const [userName, setUserName] = useState('')
 
   useEffect(() => {
     setUserName(getUserName())
+  }, [])
+
+  // Load the real last-successful-sync time from data_sync_log on mount.
+  const loadLastSync = () => {
+    fetch('/api/last-sync', { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((d) => {
+        setLastSyncedAt(d?.lastSyncedAt ?? null)
+        setSyncLoaded(true)
+      })
+      .catch(() => {
+        setSyncLoaded(true)
+      })
+  }
+
+  useEffect(() => {
+    loadLastSync()
   }, [])
 
   const isActive = (href: string) => {
@@ -68,6 +102,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
 
   const handleSync = () => {
     setIsSyncing(true)
+    setSyncFailed(false)
     fetch('/api/refresh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -76,13 +111,22 @@ export default function Sidebar({ onClose }: SidebarProps) {
       .then((r) => r.json())
       .then(() => {
         setIsSyncing(false)
-        setLastSynced('just now')
+        setLastSyncedAt(new Date().toISOString())
+        setSyncLoaded(true)
+        // Re-read the page data so freshly-synced numbers appear immediately.
+        router.refresh()
       })
       .catch(() => {
         setIsSyncing(false)
-        setLastSynced('failed')
+        setSyncFailed(true)
       })
   }
+
+  const syncLabel = syncFailed
+    ? 'sync failed'
+    : !syncLoaded
+      ? 'checking…'
+      : relTime(lastSyncedAt)
 
   const handleLogout = () => {
     document.cookie = 'mrhb_user=; path=/; max-age=0'
@@ -188,7 +232,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
             <RefreshCw size={14} className={isSyncing ? 'animate-spin' : ''} />
             {isSyncing ? 'Syncing...' : 'Sync'}
           </button>
-          <span className="text-[10px] text-mrhb-warm-grey">{lastSynced}</span>
+          <span className="text-[10px] text-mrhb-warm-grey">{syncLabel}</span>
         </div>
       </div>
     </aside>
