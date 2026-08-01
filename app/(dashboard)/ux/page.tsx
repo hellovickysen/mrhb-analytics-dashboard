@@ -12,9 +12,9 @@ import { getDateWindow } from '@/lib/utils/date-range'
 // ---------------------------------------------------------------------------
 // This is a Server Component. Reads Microsoft Clarity's aggregate
 // session-quality data (`clarity_sessions`) and per-page friction signals
-// (`clarity_friction`). Falls back to mock data (in the same shape) whenever
-// either table has no rows yet, so the UI stays reviewable before the
-// Clarity export/sync job is live.
+// (`clarity_friction`). Clarity's API routinely returns NO data, so these
+// tables are typically empty and the page falls back to clearly-labelled
+// SAMPLE data (isSourced=false) — never presented as live.
 
 interface FrictionAlert {
   label: string
@@ -41,9 +41,11 @@ interface UXData {
   newUserPct: number
   scrollDepthTrend: LineChartDataPoint[]
   topPagesByFriction: PageFrictionRow[]
+  isSourced: boolean
 }
 
 const MOCK_UX_DATA: UXData = {
+  isSourced: false,
   scrollDepth: { value: 43.1, change: -1.8 },
   activeTime: { value: 19, change: 2.4 },
   pagesPerSession: { value: 1.15, change: -0.6 },
@@ -223,6 +225,7 @@ async function getUXData(searchParams?: { range?: string }): Promise<UXData> {
     .slice(0, 5)
 
   return {
+    isSourced: true,
     scrollDepth: {
       value: scrollDepthValue,
       change: changePct(scrollDepthValue, previousSession?.scroll_depth_pct),
@@ -307,6 +310,19 @@ export default async function UXPage({
   return (
     <div>
       <Header title="UX Behavior & Friction" />
+
+      {/* Sourced-vs-sample state — mock is never presented as live */}
+      {!data.isSourced && (
+        <div className="mb-6 rounded-lg border border-amber-300 bg-amber-50 p-4">
+          <p className="text-sm font-semibold text-amber-800">Showing sample data</p>
+          <p className="mt-1 text-xs text-amber-700">
+            Microsoft Clarity returns no data through its API for this property, so these UX &amp;
+            friction metrics — including the alerts, trends and action items below — are representative
+            sample values, not live analytics. They&apos;ll go live once a working Clarity data source
+            is connected.
+          </p>
+        </div>
+      )}
 
       {/* KPI cards row — pass iconName strings, not components */}
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">

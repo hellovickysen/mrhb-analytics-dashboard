@@ -15,15 +15,11 @@ import { getDateWindow } from '@/lib/utils/date-range'
 // in_app_purchase, and the custom MRHB product events) that have been synced
 // into the `revenue` table (daily rollup by source/currency) and the
 // `transactions` table (daily rollup by transaction_type/product/currency).
-// supabase-js doesn't support server-side GROUP BY, so grouping by
-// date/source/type/month happens client-side in JS after fetching raw rows.
 //
-// NOTE: neither `revenue` nor `transactions` has a country column, so
-// revenueByCountry has no real data source yet and stays mock-only.
-//
-// Revenue data depends on the GA4 revenue event sync being configured, so the
-// mock fallback here is essential: if `revenue` is empty, this function
-// returns MOCK_REVENUE_DATA in full.
+// Revenue tracking is NOT configured yet — it requires Firebase purchase/
+// revenue events (with value + currency), so the `revenue` table is empty and
+// this page returns clearly-labelled SAMPLE data (isSourced=false). It is never
+// presented as live, and transaction event counts are not shown as revenue.
 
 interface KPIMetric {
   value: number
@@ -58,6 +54,7 @@ interface CountryRevenueRow {
 }
 
 interface RevenueData {
+  isSourced: boolean
   totalRevenue: KPIMetric
   transactionCount: KPIMetric
   avgTransactionValue: KPIMetric
@@ -70,83 +67,84 @@ interface RevenueData {
 }
 
 const MOCK_REVENUE_DATA: RevenueData = {
+  isSourced: false,
   totalRevenue: { value: 184500, change: 14.7 },
-    transactionCount: { value: 12450, change: 9.3 },
-    avgTransactionValue: { value: 14.82, change: 4.9 },
-    revenueGrowth: { value: 14.7, change: 2.1 },
+  transactionCount: { value: 12450, change: 9.3 },
+  avgTransactionValue: { value: 14.82, change: 4.9 },
+  revenueGrowth: { value: 14.7, change: 2.1 },
 
-    // 30-day daily revenue
-    revenueTrend: [
-      { date: 'Jun 24', value: 4820 },
-      { date: 'Jun 25', value: 5140 },
-      { date: 'Jun 26', value: 4960 },
-      { date: 'Jun 27', value: 5380 },
-      { date: 'Jun 28', value: 5720 },
-      { date: 'Jun 29', value: 5510 },
-      { date: 'Jun 30', value: 5290 },
-      { date: 'Jul 01', value: 5680 },
-      { date: 'Jul 02', value: 5940 },
-      { date: 'Jul 03', value: 6210 },
-      { date: 'Jul 04', value: 6480 },
-      { date: 'Jul 05', value: 6120 },
-      { date: 'Jul 06', value: 5870 },
-      { date: 'Jul 07', value: 6340 },
-      { date: 'Jul 08', value: 6690 },
-      { date: 'Jul 09', value: 6420 },
-      { date: 'Jul 10', value: 6180 },
-      { date: 'Jul 11', value: 6560 },
-      { date: 'Jul 12', value: 6910 },
-      { date: 'Jul 13', value: 6780 },
-      { date: 'Jul 14', value: 6510 },
-      { date: 'Jul 15', value: 6970 },
-      { date: 'Jul 16', value: 7240 },
-      { date: 'Jul 17', value: 7080 },
-      { date: 'Jul 18', value: 6850 },
-      { date: 'Jul 19', value: 7190 },
-      { date: 'Jul 20', value: 7460 },
-      { date: 'Jul 21', value: 7320 },
-      { date: 'Jul 22', value: 7050 },
-      { date: 'Jul 23', value: 7380 },
-    ],
+  // 30-day daily revenue
+  revenueTrend: [
+    { date: 'Jun 24', value: 4820 },
+    { date: 'Jun 25', value: 5140 },
+    { date: 'Jun 26', value: 4960 },
+    { date: 'Jun 27', value: 5380 },
+    { date: 'Jun 28', value: 5720 },
+    { date: 'Jun 29', value: 5510 },
+    { date: 'Jun 30', value: 5290 },
+    { date: 'Jul 01', value: 5680 },
+    { date: 'Jul 02', value: 5940 },
+    { date: 'Jul 03', value: 6210 },
+    { date: 'Jul 04', value: 6480 },
+    { date: 'Jul 05', value: 6120 },
+    { date: 'Jul 06', value: 5870 },
+    { date: 'Jul 07', value: 6340 },
+    { date: 'Jul 08', value: 6690 },
+    { date: 'Jul 09', value: 6420 },
+    { date: 'Jul 10', value: 6180 },
+    { date: 'Jul 11', value: 6560 },
+    { date: 'Jul 12', value: 6910 },
+    { date: 'Jul 13', value: 6780 },
+    { date: 'Jul 14', value: 6510 },
+    { date: 'Jul 15', value: 6970 },
+    { date: 'Jul 16', value: 7240 },
+    { date: 'Jul 17', value: 7080 },
+    { date: 'Jul 18', value: 6850 },
+    { date: 'Jul 19', value: 7190 },
+    { date: 'Jul 20', value: 7460 },
+    { date: 'Jul 21', value: 7320 },
+    { date: 'Jul 22', value: 7050 },
+    { date: 'Jul 23', value: 7380 },
+  ],
 
-    revenueByProduct: [
-      { name: 'TijarX', value: 68000, share: 36.8, color: '#01A6FA' },
-      { name: 'Sahal Earn', value: 42000, share: 22.8, color: '#29231D' },
-      { name: 'MRHB Store', value: 38000, share: 20.6, color: '#E5B897' },
-      { name: 'Sahal Give', value: 22000, share: 11.9, color: '#BFB4A6' },
-      { name: 'Sahal Wallet fees', value: 14500, share: 7.9, color: '#D0EFFF' },
-    ],
+  revenueByProduct: [
+    { name: 'TijarX', value: 68000, share: 36.8, color: '#01A6FA' },
+    { name: 'Sahal Earn', value: 42000, share: 22.8, color: '#29231D' },
+    { name: 'MRHB Store', value: 38000, share: 20.6, color: '#E5B897' },
+    { name: 'Sahal Give', value: 22000, share: 11.9, color: '#BFB4A6' },
+    { name: 'Sahal Wallet fees', value: 14500, share: 7.9, color: '#D0EFFF' },
+  ],
 
-    transactionsByType: [
-      { label: 'token_swap', value: 3200 },
-      { label: 'commodity_purchased', value: 2800 },
-      { label: 'gift_card_purchased', value: 2450 },
-      { label: 'staking_initiated', value: 1900 },
-      { label: 'donation_made', value: 1200 },
-      { label: 'wallet_funded', value: 900 },
-    ],
+  transactionsByType: [
+    { label: 'token_swap', value: 3200 },
+    { label: 'commodity_purchased', value: 2800 },
+    { label: 'gift_card_purchased', value: 2450 },
+    { label: 'staking_initiated', value: 1900 },
+    { label: 'donation_made', value: 1200 },
+    { label: 'wallet_funded', value: 900 },
+  ],
 
-    monthlyComparison: [
-      { month: 'February 2026', revenue: 118200, transactions: 8940, avgValue: 13.22, growth: 6.1 },
-      { month: 'March 2026', revenue: 129800, transactions: 9410, avgValue: 13.79, growth: 9.8 },
-      { month: 'April 2026', revenue: 141500, transactions: 10120, avgValue: 13.98, growth: 9.0 },
-      { month: 'May 2026', revenue: 156900, transactions: 10980, avgValue: 14.29, growth: 10.9 },
-      { month: 'June 2026', revenue: 170300, transactions: 11760, avgValue: 14.48, growth: 8.5 },
-      { month: 'July 2026', revenue: 184500, transactions: 12450, avgValue: 14.82, growth: 14.7 },
-    ],
+  monthlyComparison: [
+    { month: 'February 2026', revenue: 118200, transactions: 8940, avgValue: 13.22, growth: 6.1 },
+    { month: 'March 2026', revenue: 129800, transactions: 9410, avgValue: 13.79, growth: 9.8 },
+    { month: 'April 2026', revenue: 141500, transactions: 10120, avgValue: 13.98, growth: 9.0 },
+    { month: 'May 2026', revenue: 156900, transactions: 10980, avgValue: 14.29, growth: 10.9 },
+    { month: 'June 2026', revenue: 170300, transactions: 11760, avgValue: 14.48, growth: 8.5 },
+    { month: 'July 2026', revenue: 184500, transactions: 12450, avgValue: 14.82, growth: 14.7 },
+  ],
 
-    revenueByCountry: [
-      { country: 'United Arab Emirates', revenue: 58900, transactions: 3820, avgValue: 15.42 },
-      { country: 'Saudi Arabia', revenue: 46200, transactions: 3210, avgValue: 14.39 },
-      { country: 'United Kingdom', revenue: 24800, transactions: 1680, avgValue: 14.76 },
-      { country: 'Malaysia', revenue: 16400, transactions: 1140, avgValue: 14.39 },
-      { country: 'Indonesia', revenue: 12100, transactions: 890, avgValue: 13.60 },
-      { country: 'Turkey', revenue: 9800, transactions: 720, avgValue: 13.61 },
-      { country: 'France', revenue: 6200, transactions: 410, avgValue: 15.12 },
-      { country: 'United States', revenue: 5100, transactions: 340, avgValue: 15.00 },
-      { country: 'Pakistan', revenue: 3400, transactions: 260, avgValue: 13.08 },
-      { country: 'Nigeria', revenue: 1600, transactions: 130, avgValue: 12.31 },
-    ],
+  revenueByCountry: [
+    { country: 'United Arab Emirates', revenue: 58900, transactions: 3820, avgValue: 15.42 },
+    { country: 'Saudi Arabia', revenue: 46200, transactions: 3210, avgValue: 14.39 },
+    { country: 'United Kingdom', revenue: 24800, transactions: 1680, avgValue: 14.76 },
+    { country: 'Malaysia', revenue: 16400, transactions: 1140, avgValue: 14.39 },
+    { country: 'Indonesia', revenue: 12100, transactions: 890, avgValue: 13.60 },
+    { country: 'Turkey', revenue: 9800, transactions: 720, avgValue: 13.61 },
+    { country: 'France', revenue: 6200, transactions: 410, avgValue: 15.12 },
+    { country: 'United States', revenue: 5100, transactions: 340, avgValue: 15.00 },
+    { country: 'Pakistan', revenue: 3400, transactions: 260, avgValue: 13.08 },
+    { country: 'Nigeria', revenue: 1600, transactions: 130, avgValue: 12.31 },
+  ],
 }
 
 function monthsAgoISO(months: number): string {
@@ -271,6 +269,7 @@ async function getRevenueData(searchParams?: { range?: string }): Promise<Revenu
   })
 
   return {
+    isSourced: true,
     totalRevenue: { value: totalRevenue > 0 ? totalRevenue : MOCK_REVENUE_DATA.totalRevenue.value, change: revenueGrowth },
     transactionCount: {
       value: transactionCount > 0 ? transactionCount : MOCK_REVENUE_DATA.transactionCount.value,
@@ -348,6 +347,19 @@ export default async function RevenuePage({
   return (
     <div>
       <Header title="Revenue & Transactions" />
+
+      {/* Sourced-vs-sample state — mock is never presented as live */}
+      {!data.isSourced && (
+        <div className="mb-6 rounded-lg border border-amber-300 bg-amber-50 p-4">
+          <p className="text-sm font-semibold text-amber-800">Showing sample data — revenue not configured</p>
+          <p className="mt-1 text-xs text-amber-700">
+            Revenue tracking isn&apos;t configured yet — it requires Firebase purchase/revenue events (with
+            value &amp; currency), or an app-store financial / payment-processor feed. Every figure below is a
+            representative sample, not live revenue, and transaction event counts are not the same as financial
+            revenue. These will go live once a revenue source is connected.
+          </p>
+        </div>
+      )}
 
       {/* KPI cards row */}
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
