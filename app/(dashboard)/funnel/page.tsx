@@ -40,12 +40,11 @@ interface JourneyData {
   ga4SocialSessions: number
 }
 
-const APP_STAGE_KEYS = ['App Installs', '1st Dashboard', '1st Transaction']
+const APP_STAGE_KEYS = ['App Installs', '1st Transaction']
 
 /** Default event-name rules used when a stage has no admin config. */
 function defaultMatch(stage: string, upperName: string): boolean {
   if (stage === 'App Installs') return upperName === 'FIRST_OPEN'
-  if (stage === '1st Dashboard') return upperName.indexOf('APP_DASHBOARD') !== -1
   if (stage === '1st Transaction')
     return (
       upperName.indexOf('SEND_MONEY') !== -1 ||
@@ -90,7 +89,6 @@ async function getJourneyData(searchParams?: { range?: string }): Promise<Journe
 
     const configByStage: Record<string, Set<string>> = {
       'App Installs': new Set<string>(),
-      '1st Dashboard': new Set<string>(),
       '1st Transaction': new Set<string>(),
     }
     let configured = false
@@ -136,7 +134,7 @@ async function getJourneyData(searchParams?: { range?: string }): Promise<Journe
       supabase.from('ga_traffic').select('sessions').gte('date', since).lte('date', until).eq('channel', 'Organic Social'),
     ])
 
-    const appUsers: Record<string, number> = { 'App Installs': 0, '1st Dashboard': 0, '1st Transaction': 0 }
+    const appUsers: Record<string, number> = { 'App Installs': 0, '1st Transaction': 0 }
     for (const r of events) {
       const raw = String(r.event_name ?? '')
       const upper = raw.toUpperCase()
@@ -166,7 +164,6 @@ async function getJourneyData(searchParams?: { range?: string }): Promise<Journe
       { name: 'Impressions', value: webImpressions, note: 'Web (Search Console). Social + app-store impressions not connected.', sourced: webImpressions > 0 },
       { name: 'Clicks', value: webClicks + socialHuman, note: 'Web search clicks + human social clicks (Short.io).', sourced: webClicks + socialHuman > 0 },
       { name: 'App Installs', value: appUsers['App Installs'], note: configured ? 'First opens · admin-configured events' : 'First opens (first_open) · default', sourced: appUsers['App Installs'] > 0 },
-      { name: '1st Dashboard', value: appUsers['1st Dashboard'], note: 'Users who reached dashboard (approx.)', sourced: appUsers['1st Dashboard'] > 0 },
       { name: '1st Transaction', value: appUsers['1st Transaction'], note: 'Users who transacted — send / swap / ramp (approx.)', sourced: appUsers['1st Transaction'] > 0 },
       { name: 'Revenue', value: revenueValue, note: revenueConfigured ? 'In-app revenue' : 'Needs Firebase revenue events', sourced: revenueConfigured },
     ]
