@@ -204,13 +204,17 @@ const RANGE_LABELS: Record<string, string> = {
 // Smooth pink→navy colour ramp across the funnel (from/to = subtle per-band
 // gradient). Connected stages use their colour; not-connected renders muted.
 const STAGE_COLORS: Record<string, { from: string; to: string }> = {
-  Impressions: { from: '#F0468C', to: '#F76FA8' },
-  Clicks: { from: '#D94BA6', to: '#E86FBD' },
-  'App Installs': { from: '#B14FC4', to: '#C56FD8' },
-  '1st Dashboard': { from: '#8257D6', to: '#9B79E6' },
-  '1st Transaction': { from: '#5563DE', to: '#7C88EE' },
-  Revenue: { from: '#2E3A8C', to: '#4756B0' },
+  Impressions: { from: '#DB2777', to: '#EC4899' },
+  Clicks: { from: '#C026D3', to: '#DB2777' },
+  'App Installs': { from: '#9333EA', to: '#C026D3' },
+  '1st Dashboard': { from: '#6D28D9', to: '#8B3DE0' },
+  '1st Transaction': { from: '#4338CA', to: '#5B4FE0' },
+  Revenue: { from: '#3730A3', to: '#4F46E5' },
 }
+
+// Not-connected bands use a clearly-visible slate (not a pale beige that blends
+// into the cream page background).
+const MUTED_FILL = 'linear-gradient(135deg, #64748B, #94A3B8)'
 
 const stageColumns: DataTableColumn[] = [
   { key: 'stage', label: 'Stage', sortable: false },
@@ -232,7 +236,7 @@ export default async function FunnelPage({
   // previous boundary width and bottom edge the next, tapering 100% → TIP%.
   const n = data.stages.length
   const TOP = 100
-  const TIP = 16
+  const TIP = 22
   const boundary = (k: number): number => (n <= 0 ? TOP : TOP - (k * (TOP - TIP)) / n)
 
   const stageRows = data.stages.map((s) => ({
@@ -259,7 +263,7 @@ export default async function FunnelPage({
           {data.stages.length === 0 ? (
             <p className="py-10 text-center text-sm text-mrhb-dark/50">No journey data for this period.</p>
           ) : (
-            <div className="mx-auto flex w-full max-w-xl flex-col gap-[3px]">
+            <div className="mx-auto flex w-full max-w-2xl flex-col gap-[3px]">
               {data.stages.map((stage, index) => {
                 const colors = STAGE_COLORS[stage.name] ?? { from: '#5563DE', to: '#7C88EE' }
                 const topW = boundary(index)
@@ -269,30 +273,28 @@ export default async function FunnelPage({
                 const leftBot = (100 - botW) / 2
                 const rightBot = (100 + botW) / 2
                 const clip = `polygon(${leftTop}% 0, ${rightTop}% 0, ${rightBot}% 100%, ${leftBot}% 100%)`
-                const textW = Math.max(30, (topW + botW) / 2 - 4)
+                const textW = Math.max(38, (topW + botW) / 2 - 3)
                 const shareOfTop = stage.sourced && topValue > 0 ? (stage.value / topValue) * 100 : null
 
                 return (
-                  <div key={stage.name} className="relative h-[74px] w-full">
+                  <div key={stage.name} className="relative h-[92px] w-full">
                     {/* Trapezoid band */}
                     <div
                       className="absolute inset-0"
                       style={{
                         clipPath: clip,
                         WebkitClipPath: clip,
-                        backgroundImage: stage.sourced
-                          ? `linear-gradient(135deg, ${colors.from}, ${colors.to})`
-                          : 'linear-gradient(135deg, #CFC7BB, #DDD6CB)',
+                        backgroundImage: stage.sourced ? `linear-gradient(135deg, ${colors.from}, ${colors.to})` : MUTED_FILL,
                       }}
                     />
                     {/* Centered label (constrained to the band so text stays on colour) */}
                     <div className="absolute inset-0 flex items-center justify-center">
                       <div className="text-center leading-tight text-white" style={{ width: `${textW}%` }}>
-                        <div className="text-sm font-semibold drop-shadow-sm sm:text-base">{stage.name}</div>
-                        <div className="text-xs font-bold text-white/95 drop-shadow-sm">
+                        <div className="text-lg font-bold drop-shadow sm:text-xl">{stage.name}</div>
+                        <div className="mt-0.5 text-sm font-bold text-white drop-shadow sm:text-base">
                           {stage.sourced ? formatNumber(stage.value) : 'Not connected'}
                           {shareOfTop !== null && (
-                            <span className="ml-1 font-medium text-white/70">
+                            <span className="ml-1.5 font-semibold text-white/85">
                               · {shareOfTop.toFixed(shareOfTop >= 10 ? 0 : 1)}%
                             </span>
                           )}
