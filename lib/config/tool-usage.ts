@@ -30,6 +30,10 @@ export const DEFAULT_TOOL_MAPPINGS: ToolMapping[] = [
   { tool: 'eSIM', patterns: ['ESIM'], sortOrder: 7, isActive: true },
   { tool: 'TijarX', patterns: ['TIJARX'], sortOrder: 8, isActive: true },
   { tool: 'Zakat Calculator', patterns: ['ZAKAT'], sortOrder: 9, isActive: true },
+  { tool: 'Sahal Ramp', patterns: ['SAHAL_RAMP', 'UNIRAMP', 'ONRAMP'], sortOrder: 10, isActive: true },
+  { tool: 'Coinformance', patterns: ['COINFORMANCE'], sortOrder: 11, isActive: true },
+  { tool: 'The Muslim Traveller', patterns: ['MUSLIM_TRAVELLER'], sortOrder: 12, isActive: true },
+  { tool: 'The Life DAO', patterns: ['LIFEDAO'], sortOrder: 13, isActive: true },
 ]
 
 export type Platform = 'android' | 'ios' | 'web' | 'other'

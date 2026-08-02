@@ -51,5 +51,9 @@ insert into public.tool_usage_config (tool, patterns, sort_order, is_active) val
   ('Sahal Stake', 'SAHAL_STAKE', 6, true),
   ('eSIM', 'ESIM', 7, true),
   ('TijarX', 'TIJARX', 8, true),
-  ('Zakat Calculator', 'ZAKAT', 9, true)
+  ('Zakat Calculator', 'ZAKAT', 9, true),
+  ('Sahal Ramp', 'SAHAL_RAMP,UNIRAMP,ONRAMP', 10, true),
+  ('Coinformance', 'COINFORMANCE', 11, true),
+  ('The Muslim Traveller', 'MUSLIM_TRAVELLER', 12, true),
+  ('The Life DAO', 'LIFEDAO', 13, true)
 on conflict (tool) do nothing;
