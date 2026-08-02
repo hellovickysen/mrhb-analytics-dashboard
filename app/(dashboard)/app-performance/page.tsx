@@ -8,6 +8,7 @@ import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 import { fetchGA4AppActiveUsersTotal } from '@/lib/api-clients/ga4-app-active-total'
 import { fetchRecentPlayReviews, type PlayReviewItem } from '@/lib/api-clients/play-reviews'
+import { computeToolStats, computeToolTrend, DEFAULT_TOOL_MAPPINGS, type ToolMapping, type ToolStat } from '@/lib/config/tool-usage'
 
 // ---------------------------------------------------------------------------
 // App Performance (Sahal Wallet) — reworked for correctness.
@@ -83,6 +84,8 @@ interface AppPerformanceData {
   recentActivity: RecentActivityRow[]
   recentReviews: PlayReviewItem[]
   reviewsSampledCount: number
+  toolStats: ToolStat[]
+  toolTrend: Array<{ date: string; events: number; users: number }>
   hasEvents: boolean
 }
 
@@ -174,6 +177,8 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
     recentActivity: [],
     recentReviews: [],
     reviewsSampledCount: 0,
+    toolStats: [],
+    toolTrend: [],
     hasEvents: false,
   }
 
@@ -324,6 +329,31 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
       .sort((a, b) => b.eventCount - a.eventCount)
       .slice(0, 10)
 
+    // ---- Tool usage (admin-configurable mapping; fallback to defaults) ----
+    let toolMappings: ToolMapping[] = DEFAULT_TOOL_MAPPINGS
+    try {
+      const cfg = await supabase
+        .from('tool_usage_config')
+        .select('tool, patterns, sort_order, is_active')
+        .eq('is_active', true)
+      const cfgRows = (cfg.error ? [] : (cfg.data ?? [])) as any[]
+      if (cfgRows.length > 0) {
+        toolMappings = cfgRows.map((r) => ({
+          tool: String(r.tool),
+          patterns: String(r.patterns ?? '')
+            .split(',')
+            .map((s: string) => s.trim().toUpperCase())
+            .filter(Boolean),
+          sortOrder: Number(r.sort_order) || 0,
+          isActive: r.is_active !== false,
+        }))
+      }
+    } catch {
+      // tool_usage_config table missing → use defaults
+    }
+    const toolStats = computeToolStats(events, toolMappings)
+    const toolTrend = computeToolTrend(events, toolMappings)
+
     return {
       totalInstalls,
       installsLifetime,
@@ -344,6 +374,8 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
       recentActivity,
       recentReviews: reviews.reviews,
       reviewsSampledCount: reviews.sampledCount,
+      toolStats,
+      toolTrend,
       hasEvents,
     }
   } catch {
@@ -364,6 +396,14 @@ const RECENT_ACTIVITY_COLUMNS: DataTableColumn[] = [
   { key: 'users', label: 'Users', align: 'right', sortable: true },
 ]
 
+const TOOL_USAGE_COLUMNS: DataTableColumn[] = [
+  { key: 'tool', label: 'Tool', align: 'left', sortable: true },
+  { key: 'users', label: 'Active Users', align: 'right', sortable: true },
+  { key: 'events', label: 'Events', align: 'right', sortable: true },
+  { key: 'platform', label: 'Android / iOS / Web', align: 'right' },
+  { key: 'share', label: 'Share', align: 'right', sortable: true },
+]
+
 export default async function AppPerformancePage({
   searchParams,
 }: {
@@ -377,6 +417,21 @@ export default async function AppPerformancePage({
     eventName: row.eventName,
     eventCount: formatNumber(row.eventCount),
     users: formatNumber(row.users),
+  }))
+
+  const toolBars: BarChartDataPoint[] = data.toolStats.map((t) => ({ label: t.tool, value: t.users }))
+  const toolTrendData: AreaChartDataPoint[] = data.toolTrend.map((d) => ({
+    date: formatTrendDate(d.date),
+    value: d.events,
+    secondaryValue: d.users,
+  }))
+  const totalToolUsers = data.toolStats.reduce((s, t) => s + t.users, 0) || 1
+  const toolRows = data.toolStats.map((t) => ({
+    tool: t.tool,
+    users: formatNumber(t.users),
+    events: formatNumber(t.events),
+    platform: `${formatNumber(t.android)} / ${formatNumber(t.ios)} / ${formatNumber(t.web)}`,
+    share: formatPercent((t.users / totalToolUsers) * 100),
   }))
 
   const notLive: string[] = []
@@ -463,6 +518,48 @@ export default async function AppPerformancePage({
           height={320}
         />
       </div>
+
+      {/* Tool Usage — per in-app tool engagement */}
+      {data.toolStats.length > 0 && (
+        <div className="mb-6">
+          <h2 className="mb-1 text-lg font-semibold text-mrhb-dark">
+            Tool Usage <span className="text-xs font-normal text-mrhb-dark/40">&middot; {rangeLabel}</span>
+          </h2>
+          <p className="mb-4 text-xs text-mrhb-dark/50">
+            Engagement per in-app tool (GA4 app events, all platforms). &ldquo;Active Users&rdquo; is summed daily
+            active (a ceiling, not unique-in-period); each event counts once toward its first-matching tool. The
+            tool&rarr;event mapping is editable in Admin.
+          </p>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <BarChart
+              data={toolBars}
+              title="Active Users by Tool"
+              color="#01A6FA"
+              valueLabel="Active Users"
+              height={360}
+              layout="horizontal"
+            />
+            <AreaChart
+              data={toolTrendData}
+              title="Daily Tool Engagement"
+              color="#01A6FA"
+              fillColor="#D0EFFF"
+              seriesLabel="Events"
+              secondarySeriesLabel="Active Users"
+              secondaryColor="#E5B897"
+              height={360}
+            />
+          </div>
+          <div className="mt-4">
+            <DataTable
+              columns={TOOL_USAGE_COLUMNS}
+              data={toolRows}
+              title="Tool Usage Detail"
+              emptyMessage="No tool usage for this period."
+            />
+          </div>
+        </div>
+      )}
 
       {/* Onboarding funnel */}
       <div className="mb-6">

@@ -121,7 +121,16 @@ function statusPill(status: string | null): { label: string; cls: string } {
   return { label: 'No data', cls: 'bg-mrhb-warm-grey/20 text-mrhb-dark/50' }
 }
 
+interface ToolRow {
+  id: string
+  tool: string
+  patterns: string
+  sortOrder: number
+  active: boolean
+}
+
 let nextEventCounter = 1
+let nextToolCounter = 1
 
 function Toggle({
   checked,
@@ -234,6 +243,12 @@ export default function AdminPage() {
   const [history, setHistory] = useState<HistoryRow[]>([])
   const [syncLoading, setSyncLoading] = useState(true)
 
+  const [tools, setTools] = useState<ToolRow[]>([])
+  const [toolsLoading, setToolsLoading] = useState(true)
+  const [toolsMigration, setToolsMigration] = useState(false)
+  const [toolsSaving, setToolsSaving] = useState(false)
+  const [toolsMsg, setToolsMsg] = useState<string | null>(null)
+
   const load = () => {
     setLoading(true)
     fetch('/api/admin/tracked-events', { cache: 'no-store' })
@@ -269,9 +284,68 @@ export default function AdminPage() {
       .finally(() => setSyncLoading(false))
   }
 
+  const loadTools = () => {
+    setToolsLoading(true)
+    fetch('/api/admin/tool-config', { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((d) => {
+        setToolsMigration(!!d.tableMissing)
+        const rows: ToolRow[] = (d.tools ?? []).map((t: any, i: number) => ({
+          id: t.id ?? `tool-${i}`,
+          tool: t.tool ?? '',
+          patterns: t.patterns ?? '',
+          sortOrder: Number(t.sort_order) || 0,
+          active: t.is_active !== false,
+        }))
+        setTools(rows)
+      })
+      .catch(() => {})
+      .finally(() => setToolsLoading(false))
+  }
+
+  const updateTool = (id: string, patch: Partial<ToolRow>) => {
+    setTools((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)))
+  }
+  const addTool = () => {
+    const id = `tool-new-${nextToolCounter++}`
+    setTools((prev) => [...prev, { id, tool: '', patterns: '', sortOrder: (prev.length + 1) * 10, active: true }])
+  }
+  const removeTool = (id: string) => setTools((prev) => prev.filter((t) => t.id !== id))
+  const saveTools = () => {
+    setToolsSaving(true)
+    setToolsMsg(null)
+    fetch('/api/admin/tool-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tools: tools
+          .filter((t) => t.tool.trim() !== '')
+          .map((t) => ({ tool: t.tool.trim(), patterns: t.patterns, sort_order: t.sortOrder, is_active: t.active })),
+      }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.tableMissing) {
+          setToolsMigration(true)
+          setToolsMsg('Run migration 003_tool_usage_config.sql in Supabase to save tool mappings.')
+          return
+        }
+        if (!d.ok) {
+          setToolsMsg(d.error ?? 'Save failed.')
+          return
+        }
+        setToolsMsg(`Saved — ${d.count} tools mapped.`)
+        setTimeout(() => setToolsMsg(null), 4000)
+        loadTools()
+      })
+      .catch((e) => setToolsMsg(String(e)))
+      .finally(() => setToolsSaving(false))
+  }
+
   useEffect(() => {
     load()
     loadSyncStatus()
+    loadTools()
   }, [])
 
   const updateEvent = (id: string, patch: Partial<TrackedEventRow>) => {
@@ -497,6 +571,116 @@ export default function AdminPage() {
                     </tr>
                   ))
                 )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* Section 1b: Tool Usage Mapping */}
+      <section className="mb-8 rounded-xl bg-mrhb-white p-5 shadow-sm">
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-mrhb-dark">Tool Usage Mapping</h2>
+            <p className="mt-0.5 text-sm text-mrhb-dark/50">
+              Maps each in-app tool to UPPERCASE event-name substrings (comma-separated). Drives the App Performance
+              &ldquo;Tool Usage&rdquo; section. First-match-wins by order.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={addTool}
+              className="flex items-center gap-2 rounded-lg border border-mrhb-warm-grey/30 bg-mrhb-white px-3 py-2 text-sm font-medium text-mrhb-dark transition-colors hover:bg-mrhb-blue-light"
+            >
+              <Plus size={15} />
+              Add Tool
+            </button>
+            <button
+              type="button"
+              onClick={saveTools}
+              disabled={toolsSaving || toolsLoading}
+              className="flex items-center gap-2 rounded-lg bg-mrhb-blue px-3 py-2 text-sm font-medium text-mrhb-white transition-colors hover:bg-mrhb-blue/90 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Save size={15} />
+              {toolsSaving ? 'Saving…' : 'Save Mapping'}
+            </button>
+          </div>
+        </div>
+
+        {toolsMigration && (
+          <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+            <AlertTriangle size={15} className="mt-0.5" />
+            <span>
+              Showing built-in defaults. Apply <code className="rounded bg-amber-100 px-1">003_tool_usage_config.sql</code> in
+              Supabase to persist edits (the Tool Usage section already works on these defaults meanwhile).
+            </span>
+          </div>
+        )}
+        {toolsMsg && (
+          <div className="mb-4 rounded-lg bg-emerald-50 px-4 py-2.5 text-sm font-medium text-emerald-700">{toolsMsg}</div>
+        )}
+
+        {toolsLoading ? (
+          <p className="py-6 text-center text-sm text-mrhb-dark/50">Loading tool mapping…</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[720px] border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-mrhb-warm-grey/20">
+                  <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Tool</th>
+                  <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Event patterns (comma-separated)</th>
+                  <th className="px-3 py-2.5 text-center text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Order</th>
+                  <th className="px-3 py-2.5 text-center text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Active</th>
+                  <th className="px-3 py-2.5 text-right text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50" />
+                </tr>
+              </thead>
+              <tbody>
+                {tools.map((t) => (
+                  <tr key={t.id} className="border-b border-mrhb-warm-grey/10 last:border-0 hover:bg-mrhb-cream/60">
+                    <td className="px-3 py-2.5">
+                      <input
+                        type="text"
+                        value={t.tool}
+                        onChange={(e) => updateTool(t.id, { tool: e.target.value })}
+                        placeholder="Tool name"
+                        className="w-full min-w-[130px] rounded-lg border border-mrhb-warm-grey/30 bg-mrhb-white px-2.5 py-1.5 text-sm text-mrhb-dark focus:border-mrhb-blue focus:outline-none focus:ring-1 focus:ring-mrhb-blue"
+                      />
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <input
+                        type="text"
+                        value={t.patterns}
+                        onChange={(e) => updateTool(t.id, { patterns: e.target.value })}
+                        placeholder="MIRO, MIRO_STAKE"
+                        className="w-full min-w-[220px] rounded-lg border border-mrhb-warm-grey/30 bg-mrhb-white px-2.5 py-1.5 font-mono text-xs text-mrhb-dark focus:border-mrhb-blue focus:outline-none focus:ring-1 focus:ring-mrhb-blue"
+                      />
+                    </td>
+                    <td className="px-3 py-2.5 text-center">
+                      <input
+                        type="number"
+                        value={t.sortOrder}
+                        onChange={(e) => updateTool(t.id, { sortOrder: Number(e.target.value) || 0 })}
+                        className="w-16 rounded-lg border border-mrhb-warm-grey/30 bg-mrhb-white px-2 py-1.5 text-center text-sm text-mrhb-dark focus:border-mrhb-blue focus:outline-none focus:ring-1 focus:ring-mrhb-blue"
+                      />
+                    </td>
+                    <td className="px-3 py-2.5 text-center">
+                      <div className="flex justify-center">
+                        <Toggle checked={t.active} onChange={(next) => updateTool(t.id, { active: next })} label={`${t.tool} active`} />
+                      </div>
+                    </td>
+                    <td className="px-3 py-2.5 text-right">
+                      <button
+                        type="button"
+                        onClick={() => removeTool(t.id)}
+                        aria-label={`Remove ${t.tool || 'tool'}`}
+                        className="rounded-lg p-1.5 text-mrhb-dark/40 transition-colors hover:bg-red-50 hover:text-red-500"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
