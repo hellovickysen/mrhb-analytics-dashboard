@@ -47,7 +47,7 @@ insert into public.tool_usage_config (tool, patterns, sort_order, is_active) val
   ('Halalytix', 'HALALYTIX', 2, true),
   ('EMPLIFAI', 'EMPLIFAI', 3, true),
   ('Sahal Give', 'SAHAL_GIVE', 4, true),
-  ('MRHB Store', 'MRHB_STORE', 5, true),
+  ('MRHB Store', 'MRHB_STORE,APPS_STORE', 5, true),
   ('Sahal Stake', 'SAHAL_STAKE', 6, true),
   ('eSIM', 'ESIM', 7, true),
   ('TijarX', 'TIJARX', 8, true),

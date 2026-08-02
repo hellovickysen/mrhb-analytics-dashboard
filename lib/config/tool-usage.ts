@@ -25,7 +25,7 @@ export const DEFAULT_TOOL_MAPPINGS: ToolMapping[] = [
   { tool: 'Halalytix', patterns: ['HALALYTIX'], sortOrder: 2, isActive: true },
   { tool: 'EMPLIFAI', patterns: ['EMPLIFAI'], sortOrder: 3, isActive: true },
   { tool: 'Sahal Give', patterns: ['SAHAL_GIVE'], sortOrder: 4, isActive: true },
-  { tool: 'MRHB Store', patterns: ['MRHB_STORE'], sortOrder: 5, isActive: true },
+  { tool: 'MRHB Store', patterns: ['MRHB_STORE', 'APPS_STORE'], sortOrder: 5, isActive: true },
   { tool: 'Sahal Stake', patterns: ['SAHAL_STAKE'], sortOrder: 6, isActive: true },
   { tool: 'eSIM', patterns: ['ESIM'], sortOrder: 7, isActive: true },
   { tool: 'TijarX', patterns: ['TIJARX'], sortOrder: 8, isActive: true },
