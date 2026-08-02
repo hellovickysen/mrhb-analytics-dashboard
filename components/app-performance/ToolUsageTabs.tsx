@@ -3,6 +3,8 @@
 import { useState } from 'react'
 import KPICard from '@/components/cards/KPICard'
 import AreaChart, { type AreaChartDataPoint } from '@/components/charts/AreaChart'
+import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
+import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent } from '@/lib/utils/format'
 
 export interface ToolTabData {
@@ -21,15 +23,76 @@ function shortDate(d: string): string {
   return dt.toLocaleDateString('en-US', { month: 'short', day: '2-digit', timeZone: 'UTC' })
 }
 
+const OVERVIEW_COLUMNS: DataTableColumn[] = [
+  { key: 'tool', label: 'Tool', align: 'left', sortable: true },
+  { key: 'users', label: 'Active Users', align: 'right', sortable: true },
+  { key: 'events', label: 'Events', align: 'right', sortable: true },
+  { key: 'platform', label: 'Android / iOS / Web', align: 'right' },
+  { key: 'share', label: 'Share', align: 'right', sortable: true },
+]
+
 export default function ToolUsageTabs({ tools, rangeLabel }: { tools: ToolTabData[]; rangeLabel: string }) {
+  // active = 0 → "All Tools" overview; active = i+1 → tools[i]
   const [active, setActive] = useState(0)
   if (tools.length === 0) {
     return <p className="py-8 text-center text-sm text-mrhb-dark/50">No tool usage for this period.</p>
   }
 
-  const idx = Math.min(active, tools.length - 1)
-  const t = tools[idx]
   const totalUsers = tools.reduce((s, x) => s + x.users, 0) || 1
+  const isAll = active === 0
+
+  const tabButton = (label: string, index: number) => (
+    <button
+      key={label}
+      type="button"
+      onClick={() => setActive(index)}
+      className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition-colors ${
+        active === index
+          ? 'bg-mrhb-blue text-mrhb-white shadow-sm'
+          : 'bg-mrhb-white text-mrhb-dark/70 ring-1 ring-mrhb-warm-grey/20 hover:bg-mrhb-blue-light'
+      }`}
+    >
+      {label}
+    </button>
+  )
+
+  return (
+    <div>
+      {/* Tabs: All Tools first, then one per tool (ordered by usage) */}
+      <div className="mb-4 flex flex-wrap gap-2">
+        {tabButton('All Tools', 0)}
+        {tools.map((x, i) => tabButton(x.tool, i + 1))}
+      </div>
+
+      {isAll ? (
+        <AllToolsOverview tools={tools} totalUsers={totalUsers} />
+      ) : (
+        <ToolDetail tool={tools[Math.min(active - 1, tools.length - 1)]} totalUsers={totalUsers} rangeLabel={rangeLabel} />
+      )}
+    </div>
+  )
+}
+
+function AllToolsOverview({ tools, totalUsers }: { tools: ToolTabData[]; totalUsers: number }) {
+  const bars: BarChartDataPoint[] = tools.map((t) => ({ label: t.tool, value: t.users }))
+  const rows = tools.map((t) => ({
+    tool: t.tool,
+    users: formatNumber(t.users),
+    events: formatNumber(t.events),
+    platform: `${formatNumber(t.android)} / ${formatNumber(t.ios)} / ${formatNumber(t.web)}`,
+    share: formatPercent((t.users / totalUsers) * 100),
+  }))
+  return (
+    <div>
+      <BarChart data={bars} title="Active Users by Tool" color="#01A6FA" valueLabel="Active Users" height={360} layout="horizontal" />
+      <div className="mt-4">
+        <DataTable columns={OVERVIEW_COLUMNS} data={rows} title="All Tools — Detail" emptyMessage="No tool usage for this period." />
+      </div>
+    </div>
+  )
+}
+
+function ToolDetail({ tool: t, totalUsers, rangeLabel }: { tool: ToolTabData; totalUsers: number; rangeLabel: string }) {
   const platTotal = t.android + t.ios + t.web || 1
   const trend: AreaChartDataPoint[] = t.trend.map((p) => ({ date: shortDate(p.date), value: p.users, secondaryValue: p.events }))
   const platformRows = [
@@ -37,28 +100,8 @@ export default function ToolUsageTabs({ tools, rangeLabel }: { tools: ToolTabDat
     { k: 'iOS', v: t.ios },
     { k: 'Web', v: t.web },
   ]
-
   return (
     <div>
-      {/* Tabs (ordered by usage) */}
-      <div className="mb-4 flex flex-wrap gap-2">
-        {tools.map((x, i) => (
-          <button
-            key={x.tool}
-            type="button"
-            onClick={() => setActive(i)}
-            className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition-colors ${
-              i === idx
-                ? 'bg-mrhb-blue text-mrhb-white shadow-sm'
-                : 'bg-mrhb-white text-mrhb-dark/70 ring-1 ring-mrhb-warm-grey/20 hover:bg-mrhb-blue-light'
-            }`}
-          >
-            {x.tool}
-          </button>
-        ))}
-      </div>
-
-      {/* Cards for the active tool */}
       <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
         <KPICard
           title="Active Users"
@@ -81,7 +124,6 @@ export default function ToolUsageTabs({ tools, rangeLabel }: { tools: ToolTabDat
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* Platform split */}
         <div className="rounded-xl bg-mrhb-white p-5 shadow-sm">
           <h3 className="mb-3 text-sm font-semibold text-mrhb-dark">Platform split</h3>
           {platformRows.map((row) => (
@@ -99,7 +141,6 @@ export default function ToolUsageTabs({ tools, rangeLabel }: { tools: ToolTabDat
           ))}
         </div>
 
-        {/* Per-tool trend */}
         <div className="lg:col-span-2">
           <AreaChart
             data={trend}
