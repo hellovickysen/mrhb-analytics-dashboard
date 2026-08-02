@@ -396,6 +396,14 @@ const RECENT_ACTIVITY_COLUMNS: DataTableColumn[] = [
   { key: 'users', label: 'Users', align: 'right', sortable: true },
 ]
 
+const RANGE_LABELS: Record<string, string> = {
+  today: 'Today',
+  yesterday: 'Yesterday',
+  '7d': 'Last 7 Days',
+  '30d': 'Last 30 Days',
+  '90d': 'Last 90 Days',
+}
+
 const TOOL_USAGE_COLUMNS: DataTableColumn[] = [
   { key: 'tool', label: 'Tool', align: 'left', sortable: true },
   { key: 'users', label: 'Active Users', align: 'right', sortable: true },
@@ -410,6 +418,7 @@ export default async function AppPerformancePage({
   searchParams: { range?: string }
 }) {
   const data = await getAppPerformanceData(searchParams)
+  const rangeLabel = RANGE_LABELS[searchParams?.range ?? '30d'] ?? 'Last 30 Days'
 
   const funnelBars: BarChartDataPoint[] = data.onboardingFunnel.map((s) => ({ label: s.label, value: s.value }))
   const featureUsageBars: BarChartDataPoint[] = data.featureUsage.map((r) => ({ label: r.feature, value: r.clicks }))
