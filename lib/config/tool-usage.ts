@@ -98,6 +98,58 @@ export function computeToolStats(events: ToolEventRow[], mappings: ToolMapping[]
   return Array.from(acc.values()).sort((a, b) => b.users - a.users)
 }
 
+export interface ToolTab {
+  tool: string
+  users: number
+  events: number
+  android: number
+  ios: number
+  web: number
+  trend: Array<{ date: string; users: number; events: number }>
+}
+
+/** Per-tool stats + a per-DATE trend over the window (first-match-wins). */
+export function computeToolTabs(events: ToolEventRow[], mappings: ToolMapping[]): ToolTab[] {
+  const sorted = activeSorted(mappings)
+  const acc = new Map<
+    string,
+    { users: number; events: number; android: number; ios: number; web: number; byDate: Map<string, { users: number; events: number }> }
+  >()
+  for (const m of sorted) acc.set(m.tool, { users: 0, events: 0, android: 0, ios: 0, web: 0, byDate: new Map() })
+
+  for (const e of events) {
+    const nameUpper = String(e.event_name ?? '').toUpperCase()
+    const m = matchTool(nameUpper, sorted)
+    if (!m) continue
+    const s = acc.get(m.tool)
+    if (!s) continue
+    const c = Number(e.event_count) || 0
+    const u = Number(e.users) || 0
+    s.events += c
+    s.users += u
+    const plat = platformOf(nameUpper)
+    if (plat === 'android') s.android += u
+    else if (plat === 'ios') s.ios += u
+    else if (plat === 'web') s.web += u
+    if (e.date) {
+      const d = s.byDate.get(e.date) ?? { users: 0, events: 0 }
+      d.users += u
+      d.events += c
+      s.byDate.set(e.date, d)
+    }
+  }
+
+  return sorted
+    .map((m) => {
+      const s = acc.get(m.tool) as NonNullable<ReturnType<typeof acc.get>>
+      const trend = Array.from(s.byDate.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([date, v]) => ({ date, users: v.users, events: v.events }))
+      return { tool: m.tool, users: s.users, events: s.events, android: s.android, ios: s.ios, web: s.web, trend }
+    })
+    .sort((a, b) => b.users - a.users)
+}
+
 /** Daily total tool engagement (events + users) across all mapped tools. */
 export function computeToolTrend(events: ToolEventRow[], mappings: ToolMapping[]): Array<{ date: string; events: number; users: number }> {
   const sorted = activeSorted(mappings)
