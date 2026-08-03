@@ -198,7 +198,6 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
     }
     const pFirstOpen = P('first_open')
     const pSession = P('session_start')
-    const pGetStarted = P('get_started')
     const pOnbComplete = P('onboarding_complete')
     const pDashboard = P('dashboard')
     const pTx = P('transaction')
@@ -208,7 +207,6 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
     const prevFirstOpen = cnt(prevEvents, pFirstOpen)
     const completeUsers = usr(events, pOnbComplete)
     const prevCompleteUsers = usr(prevEvents, pOnbComplete)
-    const getStartedUsers = usr(events, pGetStarted)
     const dashboardUsers = usr(events, pDashboard)
     const prevDashboardUsers = usr(prevEvents, pDashboard)
     const txUsers = usr(events, pTx)
@@ -273,12 +271,21 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([date, e]) => ({ date: formatTrendDate(date), value: e.installs, secondaryValue: e.active }))
 
-    // ---- Onboarding funnel (all-platform, users). App-wide activity, not a cohort. ----
+    // ---- New-user onboarding DROP-OFF (new-user-only events → a real funnel).
+    // Every new-user path (Let's Go / Social Signup / Import Wallet) enters the
+    // signup flow and converges on creating a 6-digit passcode
+    // (SETTINGS_NEW_PASSCODE) — returning users never create one — then finishes
+    // at ONBOARDING_GUIDE_COMPLETE. Counts are users summed daily (a ceiling),
+    // computed identically per stage so the stage-to-stage ratios are meaningful. ----
+    const pSignupStarted = (n: string) =>
+      n.includes('ONBOARDING_LETS_GO') || n.includes('ONBOARDING_SOCIAL_SIGNUP') || n.includes('ONBOARDING_IMPORT_WALLET')
+    const pPasscodeCreated = (n: string) => n.includes('SETTINGS_NEW_PASSCODE')
+    const signupStartedUsers = usr(events, pSignupStarted)
+    const passcodeCreatedUsers = usr(events, pPasscodeCreated)
     const onboardingFunnel: FunnelStep[] = [
-      { label: 'App Opened', value: firstOpen },
-      { label: 'Get Started', value: getStartedUsers },
-      { label: 'Reached Dashboard', value: dashboardUsers },
-      { label: 'Onboarding Complete', value: completeUsers },
+      { label: 'Started signup', value: signupStartedUsers },
+      { label: 'Passcode created', value: passcodeCreatedUsers },
+      { label: 'Onboarding complete', value: completeUsers },
     ]
 
     // ---- Rating distribution (star breakdown often unavailable → all zeros) ----
@@ -437,6 +444,11 @@ export default async function AppPerformancePage({
   )
 
   const funnelBars: BarChartDataPoint[] = data.onboardingFunnel.map((s) => ({ label: s.label, value: s.value }))
+  // Stage-to-stage conversion for the new-user drop-off funnel.
+  const funnelStarted = data.onboardingFunnel[0]?.value ?? 0
+  const funnelPasscode = data.onboardingFunnel[1]?.value ?? 0
+  const funnelComplete = data.onboardingFunnel[2]?.value ?? 0
+  const convPct = (num: number, den: number): number => (den > 0 ? Math.round((num / den) * 100) : 0)
   const featureUsageBars: BarChartDataPoint[] = data.featureUsage.map((r) => ({ label: r.feature, value: r.clicks }))
   const recentActivityRows = data.recentActivity.map((row) => ({
     eventName: row.eventName,
@@ -549,13 +561,29 @@ export default async function AppPerformancePage({
         </div>
       )}
 
-      {/* Onboarding funnel */}
+      {/* New-user onboarding drop-off funnel */}
       <div className="mb-6">
-        <BarChart data={funnelBars} title="App Activity by Stage" color="#01A6FA" height={300} layout="vertical" />
+        <BarChart data={funnelBars} title="New User Onboarding — Drop-off" color="#01A6FA" height={300} layout="vertical" />
+        {funnelStarted > 0 && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+            <span className="rounded-full bg-mrhb-blue-light px-2.5 py-1 font-medium text-mrhb-blue">
+              Started → Passcode: {convPct(funnelPasscode, funnelStarted)}%
+            </span>
+            <span className="rounded-full bg-mrhb-blue-light px-2.5 py-1 font-medium text-mrhb-blue">
+              Passcode → Complete: {convPct(funnelComplete, funnelPasscode)}%
+            </span>
+            <span className="rounded-full bg-mrhb-blue px-2.5 py-1 font-medium text-mrhb-white">
+              Overall: {convPct(funnelComplete, funnelStarted)}% of starters finish
+            </span>
+          </div>
+        )}
         <p className="mt-2 text-xs text-mrhb-dark/50">
-          App-wide activity in this period (unique users per stage), not a single install cohort — later stages
-          count your whole active base, so they can exceed new installs. &ldquo;Onboarding Complete&rdquo; is
-          matched across Android/iOS/web (*_ONBOARDING_GUIDE_COMPLETE).
+          New-user signup flow only: &ldquo;Started&rdquo; = users who began any path (Let&apos;s Go, Social Signup or
+          Import Wallet); &ldquo;Passcode created&rdquo; = the create-6-digit-passcode step (*_SETTINGS_NEW_PASSCODE)
+          that every new user hits and returning users never do; &ldquo;Onboarding complete&rdquo; =
+          *_ONBOARDING_GUIDE_COMPLETE. Users are summed daily (a ceiling), matched across Android/iOS/web. These are
+          GA4 signals and undercount your backend&apos;s registered-signup total, so read them as drop-off ratios, not
+          the authoritative signup count.
         </p>
       </div>
 
