@@ -225,24 +225,6 @@ const stageColumns: DataTableColumn[] = [
   { key: 'note', label: 'Source', sortable: false },
 ]
 
-/**
- * Between-stage connector for the cone. Data-driven and honest:
- *  - next stage not sourced        → "awaiting source" (muted)
- *  - next value > current value     → cross-source (whole active base), no fake %
- *  - otherwise                      → "{n}% continue" (share of the previous stage)
- */
-function connectorInfo(
-  cur: StageResult,
-  next: StageResult | undefined
-): { arrow: string; text: string; tone: 'normal' | 'xsrc' | 'muted' } | null {
-  if (!next) return null
-  if (!next.sourced) return { arrow: '↓', text: 'awaiting source', tone: 'muted' }
-  if (!cur.sourced || cur.value <= 0) return null
-  if (next.value > cur.value) return { arrow: '↕', text: 'cross-source · counts whole active base', tone: 'xsrc' }
-  const pct = Math.round((next.value / cur.value) * 100)
-  return { arrow: '↓', text: `${pct}% continue`, tone: 'normal' }
-}
-
 export default async function FunnelPage({
   searchParams,
 }: {
@@ -283,7 +265,7 @@ export default async function FunnelPage({
           {data.stages.length === 0 ? (
             <p className="py-10 text-center text-sm text-mrhb-dark/50">No journey data for this period.</p>
           ) : (
-            <div className="mx-auto flex w-full max-w-2xl flex-col">
+            <div className="mx-auto flex w-full max-w-2xl flex-col gap-[3px]">
               {data.stages.map((stage, index) => {
                 const colors = STAGE_COLORS[stage.name] ?? { from: '#5563DE', to: '#7C88EE' }
                 const topW = boundary(index)
@@ -293,48 +275,34 @@ export default async function FunnelPage({
                 const leftBot = (100 - botW) / 2
                 const rightBot = (100 + botW) / 2
                 const clip = `polygon(${leftTop}% 0, ${rightTop}% 0, ${rightBot}% 100%, ${leftBot}% 100%)`
-                const textW = Math.max(40, (topW + botW) / 2 - 3)
+                const textW = Math.max(38, (topW + botW) / 2 - 3)
                 const shareOfTop = stage.sourced && topValue > 0 ? (stage.value / topValue) * 100 : null
-                const conn = connectorInfo(stage, data.stages[index + 1])
 
                 return (
-                  <div key={stage.name}>
+                  <div key={stage.name} className="relative h-[92px] w-full">
                     {/* Trapezoid band */}
-                    <div className="relative h-[84px] w-full">
-                      <div
-                        className="absolute inset-0"
-                        style={{
-                          clipPath: clip,
-                          WebkitClipPath: clip,
-                          backgroundImage: stage.sourced ? `linear-gradient(135deg, ${colors.from}, ${colors.to})` : MUTED_FILL,
-                        }}
-                      />
-                      {/* Centered label (constrained to the band so text stays on colour) */}
-                      <div className="absolute inset-0 flex items-center justify-center">
-                        <div className="text-center leading-tight text-white" style={{ width: `${textW}%` }}>
-                          <div className="text-lg font-extrabold tracking-tight drop-shadow sm:text-xl">{stage.name}</div>
-                          <div className="mt-0.5 text-sm font-bold text-white/95 drop-shadow sm:text-[15px]">
-                            {stage.sourced ? formatNumber(stage.value) : 'Not connected'}
-                            {shareOfTop !== null && (
-                              <span className="ml-1.5 font-semibold text-white/80">
-                                · {shareOfTop.toFixed(shareOfTop >= 10 ? 0 : 1)}%
-                              </span>
-                            )}
-                          </div>
+                    <div
+                      className="absolute inset-0"
+                      style={{
+                        clipPath: clip,
+                        WebkitClipPath: clip,
+                        backgroundImage: stage.sourced ? `linear-gradient(135deg, ${colors.from}, ${colors.to})` : MUTED_FILL,
+                      }}
+                    />
+                    {/* Centered label (constrained to the band so text stays on colour) */}
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="text-center leading-tight text-white" style={{ width: `${textW}%` }}>
+                        <div className="text-lg font-bold drop-shadow sm:text-xl">{stage.name}</div>
+                        <div className="mt-0.5 text-sm font-bold text-white drop-shadow sm:text-base">
+                          {stage.sourced ? formatNumber(stage.value) : 'Not connected'}
+                          {shareOfTop !== null && (
+                            <span className="ml-1.5 font-semibold text-white/85">
+                              · {shareOfTop.toFixed(shareOfTop >= 10 ? 0 : 1)}%
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
-                    {/* Between-stage drop-off connector */}
-                    {conn && (
-                      <div
-                        className={`flex items-center justify-center gap-1.5 py-1.5 text-[11px] font-semibold tracking-wide ${
-                          conn.tone === 'xsrc' ? 'text-[#a5722a]' : 'text-mrhb-dark/45'
-                        }`}
-                      >
-                        <span aria-hidden="true">{conn.arrow}</span>
-                        <span>{conn.text}</span>
-                      </div>
-                    )}
                   </div>
                 )
               })}
