@@ -10,6 +10,7 @@ import { fetchGA4AppActiveUsersTotal } from '@/lib/api-clients/ga4-app-active-to
 import { fetchRecentPlayReviews, type PlayReviewItem } from '@/lib/api-clients/play-reviews'
 import { computeToolTabs, DEFAULT_TOOL_MAPPINGS, type ToolMapping, type ToolTab } from '@/lib/config/tool-usage'
 import ToolUsageTabs from '@/components/app-performance/ToolUsageTabs'
+import { resolveAppMetrics, matchesAppMetric } from '@/lib/config/app-metrics'
 
 // ---------------------------------------------------------------------------
 // App Performance (Sahal Wallet) — reworked for correctness.
@@ -150,9 +151,6 @@ const cnt = (rows: EventRow[], pred: (n: string) => boolean): number =>
 const usr = (rows: EventRow[], pred: (n: string) => boolean): number =>
   rows.filter((r) => pred(U(r))).reduce((s, r) => s + (Number(r.users) || 0), 0)
 
-const isTx = (n: string): boolean =>
-  n.includes('SEND_MONEY') || n.includes('_SEND_') || n.includes('SWAP') || n.includes('SAHAL_RAMP')
-
 async function getAppPerformanceData(searchParams?: { range?: string }): Promise<AppPerformanceData> {
   const supabase = createServiceClient()
   const { startDate: since, endDate: until, prevStartDate } = getDateWindow(searchParams)
@@ -198,16 +196,40 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
 
     const hasEvents = events.length > 0
 
-    // ---- Core event aggregates (all-platform, users-based where it means users) ----
-    const firstOpen = cnt(events, (n) => n === 'FIRST_OPEN')
-    const prevFirstOpen = cnt(prevEvents, (n) => n === 'FIRST_OPEN')
-    const completeUsers = usr(events, (n) => n.includes('ONBOARDING_GUIDE_COMPLETE'))
-    const prevCompleteUsers = usr(prevEvents, (n) => n.includes('ONBOARDING_GUIDE_COMPLETE'))
-    const getStartedUsers = usr(events, (n) => n.includes('GET_STARTED'))
-    const dashboardUsers = usr(events, (n) => n.includes('APP_DASHBOARD'))
-    const prevDashboardUsers = usr(prevEvents, (n) => n.includes('APP_DASHBOARD'))
-    const txUsers = usr(events, isTx)
-    const prevTxUsers = usr(prevEvents, isTx)
+    // ---- App metric mapping (admin-editable app_metric_map; fallback defaults).
+    // Editing a block's patterns in Admin re-computes every card below. ----
+    let appMetricRows: any[] | null = null
+    try {
+      const mres = await supabase
+        .from('app_metric_map')
+        .select('key, label, patterns, match_type, description, used_by, sort_order, is_active')
+        .eq('is_active', true)
+      if (!mres.error) appMetricRows = (mres.data ?? []) as any[]
+    } catch {
+      // app_metric_map table missing → defaults
+    }
+    const appMetrics = resolveAppMetrics(appMetricRows)
+    const P = (key: string): ((n: string) => boolean) => {
+      const d = appMetrics.get(key)
+      return d ? (n: string) => matchesAppMetric(d, n) : () => false
+    }
+    const pFirstOpen = P('first_open')
+    const pSession = P('session_start')
+    const pGetStarted = P('get_started')
+    const pOnbComplete = P('onboarding_complete')
+    const pDashboard = P('dashboard')
+    const pTx = P('transaction')
+
+    // ---- Core event aggregates (config-driven; users-based where it means users) ----
+    const firstOpen = cnt(events, pFirstOpen)
+    const prevFirstOpen = cnt(prevEvents, pFirstOpen)
+    const completeUsers = usr(events, pOnbComplete)
+    const prevCompleteUsers = usr(prevEvents, pOnbComplete)
+    const getStartedUsers = usr(events, pGetStarted)
+    const dashboardUsers = usr(events, pDashboard)
+    const prevDashboardUsers = usr(prevEvents, pDashboard)
+    const txUsers = usr(events, pTx)
+    const prevTxUsers = usr(prevEvents, pTx)
 
     // ---- Total Installs: latest store snapshot (lifetime badge), never summed ----
     const installsRows = (installsRes.data ?? []) as any[]
@@ -224,8 +246,8 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
 
     // ---- Active Users: authoritative de-duplicated GA4 app metric ----
     const activeUsersSourced = activeCur > 0
-    const sessionUsers = usr(events, (n) => n === 'SESSION_START')
-    const prevSessionUsers = usr(prevEvents, (n) => n === 'SESSION_START')
+    const sessionUsers = usr(events, pSession)
+    const prevSessionUsers = usr(prevEvents, pSession)
     const activeUsers: KPIMetric = activeUsersSourced
       ? { value: activeCur, change: pctChange(activeCur, activePrev) }
       : { value: sessionUsers, change: pctChange(sessionUsers, prevSessionUsers) }
@@ -256,10 +278,12 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
     const byDate = new Map<string, { installs: number; active: number }>()
     for (const row of events) {
       const n = U(row)
-      if (n !== 'FIRST_OPEN' && n !== 'SESSION_START') continue
+      const isFo = pFirstOpen(n)
+      const isSs = pSession(n)
+      if (!isFo && !isSs) continue
       const e = byDate.get(row.date) ?? { installs: 0, active: 0 }
-      if (n === 'FIRST_OPEN') e.installs += Number(row.event_count) || 0
-      if (n === 'SESSION_START') e.active += Number(row.users) || 0
+      if (isFo) e.installs += Number(row.event_count) || 0
+      if (isSs) e.active += Number(row.users) || 0
       byDate.set(row.date, e)
     }
     const usageTrend: AreaChartDataPoint[] = Array.from(byDate.entries())
