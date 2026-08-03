@@ -18,6 +18,7 @@ import {
   RefreshCw,
   LogOut,
   X,
+  HelpCircle,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -37,6 +38,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'SEO', href: '/seo', icon: Search },
   { label: 'Blog', href: '/blog', icon: FileText },
   { label: 'Revenue', href: '/revenue', icon: DollarSign },
+  { label: 'How it works', href: '/how-it-works', icon: HelpCircle },
   { label: 'Admin', href: '/admin', icon: Settings },
 ]
 

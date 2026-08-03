@@ -129,6 +129,18 @@ interface ToolRow {
   active: boolean
 }
 
+interface AppMetricRow {
+  id: string
+  key: string
+  label: string
+  patterns: string
+  matchType: string
+  description: string
+  usedBy: string
+  sortOrder: number
+  active: boolean
+}
+
 let nextEventCounter = 1
 let nextToolCounter = 1
 
@@ -249,6 +261,12 @@ export default function AdminPage() {
   const [toolsSaving, setToolsSaving] = useState(false)
   const [toolsMsg, setToolsMsg] = useState<string | null>(null)
 
+  const [appMetrics, setAppMetrics] = useState<AppMetricRow[]>([])
+  const [appMetricsLoading, setAppMetricsLoading] = useState(true)
+  const [appMetricsMigration, setAppMetricsMigration] = useState(false)
+  const [appMetricsSaving, setAppMetricsSaving] = useState(false)
+  const [appMetricsMsg, setAppMetricsMsg] = useState<string | null>(null)
+
   const load = () => {
     setLoading(true)
     fetch('/api/admin/tracked-events', { cache: 'no-store' })
@@ -342,10 +360,75 @@ export default function AdminPage() {
       .finally(() => setToolsSaving(false))
   }
 
+  const loadAppMetrics = () => {
+    setAppMetricsLoading(true)
+    fetch('/api/admin/app-metrics', { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((d) => {
+        setAppMetricsMigration(!!d.tableMissing)
+        setAppMetrics(
+          (d.metrics ?? []).map((m: any, i: number) => ({
+            id: m.id ?? `am-${i}`,
+            key: m.key ?? '',
+            label: m.label ?? '',
+            patterns: m.patterns ?? '',
+            matchType: m.match_type ?? 'contains',
+            description: m.description ?? '',
+            usedBy: m.used_by ?? '',
+            sortOrder: Number(m.sort_order) || 0,
+            active: m.is_active !== false,
+          }))
+        )
+      })
+      .catch(() => {})
+      .finally(() => setAppMetricsLoading(false))
+  }
+  const updateAppMetric = (id: string, patch: Partial<AppMetricRow>) => {
+    setAppMetrics((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)))
+  }
+  const saveAppMetrics = () => {
+    setAppMetricsSaving(true)
+    setAppMetricsMsg(null)
+    fetch('/api/admin/app-metrics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        metrics: appMetrics.map((m) => ({
+          key: m.key,
+          label: m.label,
+          patterns: m.patterns,
+          match_type: m.matchType,
+          description: m.description,
+          used_by: m.usedBy,
+          sort_order: m.sortOrder,
+          is_active: m.active,
+        })),
+      }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.tableMissing) {
+          setAppMetricsMigration(true)
+          setAppMetricsMsg('Run migration 004_app_metric_map.sql in Supabase to save these.')
+          return
+        }
+        if (!d.ok) {
+          setAppMetricsMsg(d.error ?? 'Save failed.')
+          return
+        }
+        setAppMetricsMsg(`Saved — ${d.count} metric blocks.`)
+        setTimeout(() => setAppMetricsMsg(null), 4000)
+        loadAppMetrics()
+      })
+      .catch((e) => setAppMetricsMsg(String(e)))
+      .finally(() => setAppMetricsSaving(false))
+  }
+
   useEffect(() => {
     load()
     loadSyncStatus()
     loadTools()
+    loadAppMetrics()
   }, [])
 
   const updateEvent = (id: string, patch: Partial<TrackedEventRow>) => {
@@ -678,6 +761,99 @@ export default function AdminPage() {
                       >
                         <Trash2 size={15} />
                       </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* Section 1c: App Performance Metrics (event → card) */}
+      <section className="mb-8 rounded-xl bg-mrhb-white p-5 shadow-sm">
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-mrhb-dark">App Performance Metrics</h2>
+            <p className="mt-0.5 text-sm text-mrhb-dark/50">
+              Firebase event patterns that power each App Performance card. Edit a block&rsquo;s patterns and every
+              card it feeds updates. See &ldquo;How it works&rdquo; for the full card list.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={saveAppMetrics}
+            disabled={appMetricsSaving || appMetricsLoading}
+            className="flex items-center gap-2 rounded-lg bg-mrhb-blue px-3 py-2 text-sm font-medium text-mrhb-white transition-colors hover:bg-mrhb-blue/90 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Save size={15} />
+            {appMetricsSaving ? 'Saving…' : 'Save Metrics'}
+          </button>
+        </div>
+
+        {appMetricsMigration && (
+          <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800">
+            <AlertTriangle size={15} className="mt-0.5" />
+            <span>
+              Showing built-in defaults. Apply <code className="rounded bg-amber-100 px-1">004_app_metric_map.sql</code> in
+              Supabase to persist edits (cards already compute on these defaults meanwhile).
+            </span>
+          </div>
+        )}
+        {appMetricsMsg && (
+          <div className="mb-4 rounded-lg bg-emerald-50 px-4 py-2.5 text-sm font-medium text-emerald-700">{appMetricsMsg}</div>
+        )}
+
+        {appMetricsLoading ? (
+          <p className="py-6 text-center text-sm text-mrhb-dark/50">Loading metric mapping…</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[860px] border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-mrhb-warm-grey/20">
+                  <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Metric block</th>
+                  <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Event patterns</th>
+                  <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Match</th>
+                  <th className="px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Powers cards</th>
+                  <th className="px-3 py-2.5 text-center text-xs font-semibold uppercase tracking-wide text-mrhb-dark/50">Active</th>
+                </tr>
+              </thead>
+              <tbody>
+                {appMetrics.map((m) => (
+                  <tr key={m.id} className="border-b border-mrhb-warm-grey/10 last:border-0 align-top hover:bg-mrhb-cream/60">
+                    <td className="px-3 py-2.5">
+                      <input
+                        type="text"
+                        value={m.label}
+                        onChange={(e) => updateAppMetric(m.id, { label: e.target.value })}
+                        className="w-full min-w-[150px] rounded-lg border border-mrhb-warm-grey/30 bg-mrhb-white px-2.5 py-1.5 text-sm text-mrhb-dark focus:border-mrhb-blue focus:outline-none focus:ring-1 focus:ring-mrhb-blue"
+                      />
+                      <span className="mt-1 block font-mono text-[10px] text-mrhb-dark/40">{m.key}</span>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <input
+                        type="text"
+                        value={m.patterns}
+                        onChange={(e) => updateAppMetric(m.id, { patterns: e.target.value })}
+                        placeholder="EVENT_NAME, ANOTHER"
+                        className="w-full min-w-[220px] rounded-lg border border-mrhb-warm-grey/30 bg-mrhb-white px-2.5 py-1.5 font-mono text-xs text-mrhb-dark focus:border-mrhb-blue focus:outline-none focus:ring-1 focus:ring-mrhb-blue"
+                      />
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <select
+                        value={m.matchType}
+                        onChange={(e) => updateAppMetric(m.id, { matchType: e.target.value })}
+                        className="rounded-lg border border-mrhb-warm-grey/30 bg-mrhb-white px-2.5 py-1.5 text-sm text-mrhb-dark focus:border-mrhb-blue focus:outline-none focus:ring-1 focus:ring-mrhb-blue"
+                      >
+                        <option value="contains">contains</option>
+                        <option value="exact">exact</option>
+                      </select>
+                    </td>
+                    <td className="px-3 py-2.5 text-xs text-mrhb-dark/50">{m.usedBy}</td>
+                    <td className="px-3 py-2.5 text-center">
+                      <div className="flex justify-center">
+                        <Toggle checked={m.active} onChange={(next) => updateAppMetric(m.id, { active: next })} label={`${m.label} active`} />
+                      </div>
                     </td>
                   </tr>
                 ))}
