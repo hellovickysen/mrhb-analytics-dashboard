@@ -77,6 +77,17 @@ function matchTool(nameUpper: string, sorted: ToolMapping[]): ToolMapping | null
   return null
 }
 
+/**
+ * Classify a single event name to its tool (first-match-wins by sortOrder),
+ * using the same mapping the Tool Usage tabs use. Returns the tool's display
+ * name, or null if no tool matches. Exposed so other views (e.g. the tile-click
+ * chart) group by tool consistently instead of by raw event name.
+ */
+export function toolForEventName(eventName: string, mappings: ToolMapping[]): string | null {
+  const m = matchTool(String(eventName ?? '').toUpperCase(), activeSorted(mappings))
+  return m ? m.tool : null
+}
+
 /** Aggregates per-tool users/events + platform split (first-match-wins). */
 export function computeToolStats(events: ToolEventRow[], mappings: ToolMapping[]): ToolStat[] {
   const sorted = activeSorted(mappings)

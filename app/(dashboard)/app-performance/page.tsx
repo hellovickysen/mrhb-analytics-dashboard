@@ -8,7 +8,7 @@ import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 import { fetchGA4AppActiveUsersTotal } from '@/lib/api-clients/ga4-app-active-total'
 import { fetchRecentPlayReviews, type PlayReviewItem } from '@/lib/api-clients/play-reviews'
-import { computeToolTabs, DEFAULT_TOOL_MAPPINGS, type ToolMapping, type ToolTab } from '@/lib/config/tool-usage'
+import { computeToolTabs, toolForEventName, DEFAULT_TOOL_MAPPINGS, type ToolMapping, type ToolTab } from '@/lib/config/tool-usage'
 import ToolUsageTabs from '@/components/app-performance/ToolUsageTabs'
 import { resolveAppMetrics, matchesAppMetric } from '@/lib/config/app-metrics'
 
@@ -90,27 +90,10 @@ interface AppPerformanceData {
   hasEvents: boolean
 }
 
-const TILE_FEATURE_LABELS: Record<string, string> = {
-  AppScreen: 'App Screen',
-  PersonalizeWallet: 'Personalize Wallet',
-  MIROStaking: 'MIRO Staking',
-  MRHBStore: 'MRHB Store',
-}
-
 function formatTrendDate(dateStr: string): string {
   const d = new Date(`${dateStr}T00:00:00Z`)
   if (Number.isNaN(d.getTime())) return dateStr
   return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit', timeZone: 'UTC' })
-}
-
-function titleCaseTileType(raw: string): string {
-  const spaced = raw.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-  return spaced.length > 0 ? spaced : raw
-}
-
-function tileFeatureLabel(eventName: string): string {
-  const suffix = eventName.replace(/^E[AIW]_T_/, '')
-  return TILE_FEATURE_LABELS[suffix] ?? titleCaseTileType(suffix)
 }
 
 /** Percent change of current vs previous. Returns null when there's no usable
@@ -333,16 +316,14 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
       { store: 'App Store', avgRating: 0, reviewsCount: 0, connected: false },
     ]
 
-    // ---- Feature usage: E?_T_* tile-click events ----
+    // ---- Feature usage (tile clicks): accumulate raw E?_T_* tile events here;
+    // they're grouped BY TOOL below (once the tool mapping is resolved) so each
+    // tool shows once with a clean name instead of fragmented raw event labels. ----
     const tileTotals = new Map<string, number>()
     for (const row of events) {
       if (!/^E[AIW]_T_/.test(U(row))) continue
       tileTotals.set(row.event_name, (tileTotals.get(row.event_name) ?? 0) + (Number(row.event_count) || 0))
     }
-    const featureUsage: FeatureUsageRow[] = Array.from(tileTotals.entries())
-      .map(([eventName, clicks]) => ({ feature: tileFeatureLabel(eventName), eventName, clicks }))
-      .sort((a, b) => b.clicks - a.clicks)
-      .slice(0, 12)
 
     // ---- Recent activity: top events on the most recent day with data ----
     const latestEventDate = events.reduce<string | null>((latest, r) => (!latest || r.date > latest ? r.date : latest), null)
@@ -375,6 +356,23 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
       // tool_usage_config table missing → use defaults
     }
     const toolTabs = computeToolTabs(events, toolMappings)
+
+    // ---- Feature usage BY TOOL: group the raw tile clicks using the SAME
+    // mapping as the Tool Usage tabs (first-match-wins). Each tool appears once
+    // with its clean display name; tile clicks that map to no tool are pooled
+    // into a single "Other tiles" bar so nothing is dropped or fragmented. ----
+    const featureTotals = new Map<string, number>()
+    let otherTileClicks = 0
+    Array.from(tileTotals.entries()).forEach(([eventName, clicks]) => {
+      const tool = toolForEventName(eventName, toolMappings)
+      if (tool) featureTotals.set(tool, (featureTotals.get(tool) ?? 0) + clicks)
+      else otherTileClicks += clicks
+    })
+    const featureUsage: FeatureUsageRow[] = Array.from(featureTotals.entries())
+      .map(([feature, clicks]) => ({ feature, eventName: feature, clicks }))
+      .sort((a, b) => b.clicks - a.clicks)
+      .slice(0, 13)
+    if (otherTileClicks > 0) featureUsage.push({ feature: 'Other tiles', eventName: '__other__', clicks: otherTileClicks })
 
     return {
       totalInstalls,
@@ -638,10 +636,10 @@ export default async function AppPerformancePage({
         </div>
       )}
 
-      {/* Feature usage — tile click events */}
+      {/* Feature usage — tile clicks grouped by tool */}
       {featureUsageBars.length > 0 && (
         <div className="mb-6">
-          <BarChart data={featureUsageBars} title="Feature Usage (Tile Clicks)" color="#01A6FA" height={320} layout="vertical" />
+          <BarChart data={featureUsageBars} title="Tile Clicks by Tool" color="#01A6FA" height={340} layout="horizontal" valueLabel="Tile Clicks" />
         </div>
       )}
 
