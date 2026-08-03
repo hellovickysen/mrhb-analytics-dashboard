@@ -595,28 +595,37 @@ export default async function AppPerformancePage({
                 const clip = `polygon(${leftTop}% 0, ${rightTop}% 0, ${rightBot}% 100%, ${leftBot}% 100%)`
                 const textW = Math.max(46, (topW + botW) / 2 - 3)
                 const shareOfTop = funnelStarted > 0 ? (stage.value / funnelStarted) * 100 : 0
+                const next = funnelStages[index + 1]
 
                 return (
-                  <div key={stage.label} className="relative h-[96px] w-full">
-                    <div
-                      className="absolute inset-0"
-                      style={{
-                        clipPath: clip,
-                        WebkitClipPath: clip,
-                        backgroundImage: `linear-gradient(135deg, ${colors.from}, ${colors.to})`,
-                      }}
-                    />
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <div className="text-center leading-tight text-white" style={{ width: `${textW}%` }}>
-                        <div className="text-lg font-bold drop-shadow sm:text-xl">{stage.label}</div>
-                        <div className="mt-0.5 text-sm font-bold text-white drop-shadow sm:text-base">
-                          {formatNumber(stage.value)}
-                          <span className="ml-1.5 font-semibold text-white/85">
-                            · {shareOfTop.toFixed(shareOfTop >= 10 ? 0 : 1)}%
-                          </span>
+                  <div key={stage.label}>
+                    <div className="relative h-[96px] w-full">
+                      <div
+                        className="absolute inset-0"
+                        style={{
+                          clipPath: clip,
+                          WebkitClipPath: clip,
+                          backgroundImage: `linear-gradient(135deg, ${colors.from}, ${colors.to})`,
+                        }}
+                      />
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <div className="text-center leading-tight text-white" style={{ width: `${textW}%` }}>
+                          <div className="text-lg font-bold drop-shadow sm:text-xl">{stage.label}</div>
+                          <div className="mt-0.5 text-sm font-bold text-white drop-shadow sm:text-base">
+                            {formatNumber(stage.value)}
+                            <span className="ml-1.5 font-semibold text-white/85">
+                              · {shareOfTop.toFixed(shareOfTop >= 10 ? 0 : 1)}%
+                            </span>
+                          </div>
                         </div>
                       </div>
                     </div>
+                    {next && (
+                      <div className="flex items-center justify-center gap-1.5 py-1 text-[11px] font-semibold tracking-wide text-mrhb-dark/45">
+                        <span aria-hidden="true">↓</span>
+                        <span>{convPct(next.value, stage.value)}% continue</span>
+                      </div>
+                    )}
                   </div>
                 )
               })}
