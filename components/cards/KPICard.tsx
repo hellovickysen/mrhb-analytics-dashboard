@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { formatNumber } from '@/lib/utils/format'
 import {
   ArrowUp,
   ArrowDown,
@@ -98,6 +99,15 @@ export default function KPICard({
   const hasChange = typeof change === 'number'
   const hasDelta = typeof changeValue === 'number' && Number.isFinite(changeValue)
 
+  // Recover the previous-period value from the two props we already have:
+  // delta = current − previous and pct = delta / previous, so
+  // previous = delta ÷ (pct/100). No extra data needed on the page.
+  const previousValue =
+    hasChange && hasDelta && (change as number) !== 0
+      ? (changeValue as number) / ((change as number) / 100)
+      : undefined
+  const hasPrevious = typeof previousValue === 'number' && Number.isFinite(previousValue)
+
   return (
     <div className="group relative rounded-xl bg-mrhb-white p-5 shadow-sm transition-shadow duration-200 hover:shadow-lg">
       <div className="flex items-start justify-between">
@@ -145,9 +155,9 @@ export default function KPICard({
         )}
       </div>
       <p className="mt-1 text-2xl font-semibold text-mrhb-dark">{value}</p>
-      {hasDelta && (
+      {hasPrevious && (
         <p className="mt-0.5 text-[11px] text-mrhb-dark/40">
-          {formatSignedDelta(changeValue as number)} vs previous period
+          vs {formatNumber(Math.round(previousValue as number))} previous period
         </p>
       )}
     </div>
