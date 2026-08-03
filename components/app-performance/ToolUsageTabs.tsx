@@ -28,7 +28,12 @@ function avgDaily(users: number, rangeDays: number): number {
   return rangeDays > 0 ? users / rangeDays : users
 }
 function fmtAvg(v: number): string {
-  return v >= 10 ? formatNumber(Math.round(v)) : v.toFixed(1)
+  // Whole numbers only: 0.5 or more rounds up to the next figure, below 0.5
+  // rounds down to the previous figure. A tool with any real usage never
+  // shows 0 — it floors to 1.
+  const rounded = Math.round(v)
+  if (rounded === 0 && v > 0) return '1'
+  return formatNumber(rounded)
 }
 
 const OVERVIEW_COLUMNS: DataTableColumn[] = [
