@@ -43,6 +43,28 @@ export function formatPercent(n: number | null | undefined): string {
 }
 
 /**
+ * Derive the ABSOLUTE change from a current value and its percentage change vs
+ * the previous period. Because pct = (current − previous) / previous, the
+ * previous value is current / (1 + pct/100), so the absolute delta is exactly
+ * consistent with the percentage shown on the card — no extra query needed.
+ *
+ * Returns undefined when there is no comparable baseline (pct null/undefined,
+ * or pct = −100 which implies a zero previous period).
+ */
+export function deltaFromPct(
+  currentValue: number | null | undefined,
+  changePct: number | null | undefined
+): number | undefined {
+  if (currentValue === null || currentValue === undefined || Number.isNaN(currentValue)) return undefined
+  if (changePct === null || changePct === undefined || Number.isNaN(changePct)) return undefined
+  const denom = 1 + changePct / 100
+  if (denom === 0 || !Number.isFinite(denom)) return undefined
+  const previous = currentValue / denom
+  const delta = currentValue - previous
+  return Number.isFinite(delta) ? delta : undefined
+}
+
+/**
  * Human readable duration from seconds.
  * Examples: 83 -> "1m 23s", 45 -> "45s", 3725 -> "1h 2m 5s"
  */

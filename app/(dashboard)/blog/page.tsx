@@ -4,7 +4,7 @@ import AreaChart, { type AreaChartDataPoint } from '@/components/charts/AreaChar
 import DonutChart, { type DonutChartDataPoint } from '@/components/charts/DonutChart'
 import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
-import { formatNumber, formatPercent, formatDuration } from '@/lib/utils/format'
+import { formatNumber, formatPercent, formatDuration, deltaFromPct } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 
@@ -463,6 +463,7 @@ export default async function BlogPage({
           title="Total Blog Views"
           value={formatNumber(data.totalBlogViews.value)}
           change={data.totalBlogViews.change}
+          changeValue={deltaFromPct(data.totalBlogViews.value, data.totalBlogViews.change)}
           trend={getTrend(data.totalBlogViews.change)}
           iconName="file-text"
           tooltip="Total page views across all blog articles"
@@ -471,6 +472,7 @@ export default async function BlogPage({
           title="Avg Read Time"
           value={formatDuration(data.avgReadTime.value)}
           change={data.avgReadTime.change}
+          changeValue={deltaFromPct(data.avgReadTime.value, data.avgReadTime.change)}
           trend={getTrend(data.avgReadTime.change)}
           iconName="scroll-text"
           tooltip="Average time readers spend on a blog article (pageview-weighted)"
@@ -479,6 +481,7 @@ export default async function BlogPage({
           title="Top Post Views"
           value={formatNumber(data.topPostViews.value)}
           change={data.topPostViews.change}
+          changeValue={deltaFromPct(data.topPostViews.value, data.topPostViews.change)}
           trend={getTrend(data.topPostViews.change)}
           iconName="trending-up"
           tooltip="Page views of your most popular blog article"
@@ -487,6 +490,7 @@ export default async function BlogPage({
           title="Search Impressions"
           value={formatNumber(data.searchImpressions.value)}
           change={data.searchImpressions.change}
+          changeValue={deltaFromPct(data.searchImpressions.value, data.searchImpressions.change)}
           trend={getTrend(data.searchImpressions.change)}
           iconName="search"
           tooltip="How many times your blog articles appeared in Google search results"

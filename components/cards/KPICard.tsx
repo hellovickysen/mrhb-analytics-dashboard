@@ -21,6 +21,7 @@ import {
   Trophy,
   AlertTriangle,
   Repeat,
+  UserPlus,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -45,12 +46,17 @@ const ICON_MAP: Record<string, LucideIcon> = {
   trophy: Trophy,
   'alert-triangle': AlertTriangle,
   repeat: Repeat,
+  'user-plus': UserPlus,
 }
 
 interface KPICardProps {
   title: string
   value: string | number
+  /** Percentage change vs the previous period. */
   change?: number
+  /** Absolute change vs the previous period (signed). Shown next to the % as
+   * e.g. "+1,234" / "−230" so managers see both the rate and the raw movement. */
+  changeValue?: number
   trend?: Trend
   iconName: string
   tooltip?: string
@@ -65,10 +71,22 @@ const TREND_STYLES: Record<
   flat: { textClass: 'text-mrhb-warm-grey', Icon: Minus },
 }
 
+/** Formats a signed delta with a thousands separator and an explicit +/− sign
+ * (true minus glyph). Large magnitudes round to whole numbers (e.g. "+1,234");
+ * small magnitudes keep one decimal so rate/rating/position deltas don't
+ * collapse to "±0" (e.g. a 0.15 pp move → "+0.2"). */
+function formatSignedDelta(delta: number): string {
+  const sign = delta > 0 ? '+' : delta < 0 ? '−' : '±'
+  const abs = Math.abs(delta)
+  const num = abs >= 10 ? Math.round(abs).toLocaleString('en-US') : abs.toFixed(1)
+  return `${sign}${num}`
+}
+
 export default function KPICard({
   title,
   value,
   change,
+  changeValue,
   trend = 'flat',
   iconName,
   tooltip,
@@ -77,17 +95,29 @@ export default function KPICard({
   const Icon = ICON_MAP[iconName] ?? Users
   const [showTooltip, setShowTooltip] = useState(false)
 
+  const hasChange = typeof change === 'number'
+  const hasDelta = typeof changeValue === 'number' && Number.isFinite(changeValue)
+
   return (
     <div className="group relative rounded-xl bg-mrhb-white p-5 shadow-sm transition-shadow duration-200 hover:shadow-lg">
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between">
         <div className="flex h-10 w-10 items-center justify-center rounded-full bg-mrhb-blue-light">
           <Icon size={20} className="text-mrhb-blue" />
         </div>
 
-        {typeof change === 'number' && (
-          <div className={`flex items-center gap-1 text-sm font-medium ${textClass}`}>
-            <TrendIcon size={14} />
-            <span>{Math.abs(change).toFixed(1)}%</span>
+        {(hasChange || hasDelta) && (
+          <div className={`flex flex-col items-end gap-0.5 ${textClass}`}>
+            {hasChange && (
+              <div className="flex items-center gap-1 text-sm font-medium">
+                <TrendIcon size={14} />
+                <span>{Math.abs(change as number).toFixed(1)}%</span>
+              </div>
+            )}
+            {hasDelta && (
+              <span className="text-xs font-medium tabular-nums opacity-90">
+                {formatSignedDelta(changeValue as number)}
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -115,6 +145,11 @@ export default function KPICard({
         )}
       </div>
       <p className="mt-1 text-2xl font-semibold text-mrhb-dark">{value}</p>
+      {hasDelta && (
+        <p className="mt-0.5 text-[11px] text-mrhb-dark/40">
+          {formatSignedDelta(changeValue as number)} vs previous period
+        </p>
+      )}
     </div>
   )
 }

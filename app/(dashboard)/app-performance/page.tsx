@@ -3,7 +3,7 @@ import KPICard from '@/components/cards/KPICard'
 import AreaChart, { type AreaChartDataPoint } from '@/components/charts/AreaChart'
 import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
-import { formatNumber, formatPercent } from '@/lib/utils/format'
+import { formatNumber, formatPercent, deltaFromPct } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 import { fetchGA4AppActiveUsersTotal } from '@/lib/api-clients/ga4-app-active-total'
@@ -475,6 +475,7 @@ export default async function AppPerformancePage({
           title={data.installsLifetime ? 'Total Installs (lifetime)' : 'New Installs (period)'}
           value={formatNumber(data.totalInstalls.value)}
           change={data.totalInstalls.change ?? undefined}
+          changeValue={deltaFromPct(data.totalInstalls.value, data.totalInstalls.change)}
           trend={getTrend(data.totalInstalls.change)}
           iconName="smartphone"
           tooltip={
@@ -487,6 +488,7 @@ export default async function AppPerformancePage({
           title="Active Users"
           value={formatNumber(data.activeUsers.value)}
           change={data.activeUsers.change ?? undefined}
+          changeValue={deltaFromPct(data.activeUsers.value, data.activeUsers.change)}
           trend={getTrend(data.activeUsers.change)}
           iconName="users"
           tooltip="De-duplicated active users of the Sahal Wallet app for this period (GA4 app property)."
@@ -495,6 +497,7 @@ export default async function AppPerformancePage({
           title="Avg Rating"
           value={data.ratingsSourced ? data.avgRating.value.toFixed(1) : '—'}
           change={data.avgRating.change ?? undefined}
+          changeValue={deltaFromPct(data.avgRating.value, data.avgRating.change)}
           trend={getTrend(data.avgRating.change)}
           iconName="trending-up"
           tooltip="Average Play Store star rating (out of 5). App Store not connected."
@@ -503,6 +506,7 @@ export default async function AppPerformancePage({
           title="Onboarding Rate"
           value={formatPercent(data.onboardingRate.value)}
           change={data.onboardingRate.change ?? undefined}
+          changeValue={deltaFromPct(data.onboardingRate.value, data.onboardingRate.change)}
           trend={getTrend(data.onboardingRate.change)}
           iconName="filter"
           tooltip="Onboarding completions vs new installs (approx.): users completing *_ONBOARDING_GUIDE_COMPLETE ÷ first_open."
@@ -511,6 +515,7 @@ export default async function AppPerformancePage({
           title="Transaction Rate"
           value={formatPercent(data.transactionRate.value)}
           change={data.transactionRate.change ?? undefined}
+          changeValue={deltaFromPct(data.transactionRate.value, data.transactionRate.change)}
           trend={getTrend(data.transactionRate.change)}
           iconName="dollar-sign"
           tooltip="Transacting users ÷ users reaching the dashboard (send / swap / ramp events, all platforms)."

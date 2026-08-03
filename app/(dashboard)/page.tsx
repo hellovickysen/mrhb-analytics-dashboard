@@ -1,7 +1,7 @@
 import Header from '@/components/layout/Header'
 import KPICard from '@/components/cards/KPICard'
 import LineChart, { type LineChartDataPoint } from '@/components/charts/LineChart'
-import { formatNumber } from '@/lib/utils/format'
+import { formatNumber, deltaFromPct } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 import { fetchGA4AppActiveUsersTotal } from '@/lib/api-clients/ga4-app-active-total'
@@ -394,6 +394,7 @@ export default async function OverviewPage({
           title="Total Users"
           value={formatNumber(data.totalUsers.value)}
           change={data.totalUsers.change ?? undefined}
+          changeValue={deltaFromPct(data.totalUsers.value, data.totalUsers.change)}
           trend={getTrend(data.totalUsers.change)}
           iconName="users"
           tooltip="Website users for this period — de-duplicated active users (matches the Traffic page)"
@@ -402,6 +403,7 @@ export default async function OverviewPage({
           title="App Installs"
           value={formatNumber(data.appInstalls.value)}
           change={data.appInstalls.change ?? undefined}
+          changeValue={deltaFromPct(data.appInstalls.value, data.appInstalls.change)}
           trend={getTrend(data.appInstalls.change)}
           iconName="smartphone"
           tooltip="First-time app opens (Firebase first_open) — a proxy for installs, not a Play-Store-verified install count"
@@ -410,6 +412,7 @@ export default async function OverviewPage({
           title="Organic Clicks"
           value={formatNumber(data.organicClicks.value)}
           change={data.organicClicks.change ?? undefined}
+          changeValue={deltaFromPct(data.organicClicks.value, data.organicClicks.change)}
           trend={getTrend(data.organicClicks.change)}
           iconName="mouse-pointer-click"
           tooltip="Clicks from Google search results to your website (from Search Console page data — matches the SEO page)"
@@ -424,6 +427,7 @@ export default async function OverviewPage({
           title="Wallet Active Users"
           value={formatNumber(data.walletActiveUsers.value)}
           change={data.walletActiveUsers.change ?? undefined}
+          changeValue={deltaFromPct(data.walletActiveUsers.value, data.walletActiveUsers.change)}
           trend={getTrend(data.walletActiveUsers.change)}
           iconName="users"
           tooltip="Unique active users in the Sahal Wallet app for this period (de-duplicated, from Firebase GA4)"
@@ -432,6 +436,7 @@ export default async function OverviewPage({
           title="Revenue"
           value={data.revenueConfigured ? `$${formatNumber(data.revenue.value)}` : 'Not configured'}
           change={data.revenueConfigured ? data.revenue.change ?? undefined : undefined}
+          changeValue={data.revenueConfigured ? deltaFromPct(data.revenue.value, data.revenue.change) : undefined}
           trend={getTrend(data.revenueConfigured ? data.revenue.change : null)}
           iconName="dollar-sign"
           tooltip={

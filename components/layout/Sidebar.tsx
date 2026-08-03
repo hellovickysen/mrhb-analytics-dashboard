@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { useState, useEffect } from 'react'
 import { MRHB_LOGO } from '@/lib/utils/logo'
 import {
@@ -67,9 +67,29 @@ interface SidebarProps {
   onClose?: () => void
 }
 
+/** Read the persisted range cookie (client-only) as a fallback before the URL
+ * carries the param on a fresh load. */
+function readRangeCookie(): string | null {
+  if (typeof document === 'undefined') return null
+  const m = document.cookie.match(/(?:^|;\s*)mrhb_range=([^;]+)/)
+  return m ? decodeURIComponent(m[1]) : null
+}
+
 export default function Sidebar({ onClose }: SidebarProps) {
   const pathname = usePathname()
   const router = useRouter()
+  const searchParams = useSearchParams()
+  // Keep the selected range on every nav link so navigating between pages
+  // preserves the user's choice. Prefer the URL param; fall back to the session
+  // cookie (set by Header) on a fresh load before the URL is rewritten.
+  const [rangeParam, setRangeParam] = useState<string | null>(null)
+  useEffect(() => {
+    setRangeParam(searchParams.get('range') || readRangeCookie())
+  }, [searchParams])
+
+  const withRange = (href: string): string =>
+    rangeParam ? `${href}?range=${rangeParam}` : href
+
   const [isSyncing, setIsSyncing] = useState(false)
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null)
   const [syncLoaded, setSyncLoaded] = useState(false)
@@ -174,7 +194,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
             return (
               <li key={item.href}>
                 <Link
-                  href={item.href}
+                  href={withRange(item.href)}
                   onClick={handleNavClick}
                   className={`group flex items-center gap-3 rounded-lg border-l-[3px] px-3 py-2.5 text-sm transition-colors ${
                     active

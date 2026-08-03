@@ -4,7 +4,7 @@ import AreaChart, { type AreaChartDataPoint } from '@/components/charts/AreaChar
 import DonutChart, { type DonutChartDataPoint } from '@/components/charts/DonutChart'
 import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
-import { formatNumber, formatPercent, formatDuration } from '@/lib/utils/format'
+import { formatNumber, formatPercent, formatDuration, deltaFromPct } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 
@@ -450,6 +450,7 @@ export default async function TrafficPage({
           title="Sessions"
           value={formatNumber(data.sessions.value)}
           change={data.sessions.change}
+          changeValue={deltaFromPct(data.sessions.value, data.sessions.change)}
           trend={getTrend(data.sessions.change)}
           iconName="mouse-pointer-click"
           tooltip="Total visits to your website. One person can have multiple sessions"
@@ -458,6 +459,7 @@ export default async function TrafficPage({
           title="Users"
           value={formatNumber(data.users.value)}
           change={data.users.change}
+          changeValue={deltaFromPct(data.users.value, data.users.change)}
           trend={getTrend(data.users.change)}
           iconName="users"
           tooltip="Unique people who visited your website (de-duplicated by GA4)"
@@ -466,6 +468,7 @@ export default async function TrafficPage({
           title="New Users"
           value={formatNumber(data.newUsers.value)}
           change={data.newUsers.change}
+          changeValue={deltaFromPct(data.newUsers.value, data.newUsers.change)}
           trend={getTrend(data.newUsers.change)}
           iconName="trending-up"
           tooltip="First-time visitors who never visited your site before"

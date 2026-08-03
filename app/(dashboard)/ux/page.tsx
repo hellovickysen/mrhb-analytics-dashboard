@@ -3,7 +3,7 @@ import KPICard from '@/components/cards/KPICard'
 import LineChart, { type LineChartDataPoint } from '@/components/charts/LineChart'
 import DonutChart, { type DonutChartDataPoint } from '@/components/charts/DonutChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
-import { formatPercent, formatDuration } from '@/lib/utils/format'
+import { formatPercent, formatDuration, deltaFromPct } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 
@@ -330,6 +330,7 @@ export default async function UXPage({
           title="Scroll Depth"
           value={formatPercent(data.scrollDepth.value)}
           change={data.scrollDepth.change}
+          changeValue={deltaFromPct(data.scrollDepth.value, data.scrollDepth.change)}
           trend={getTrend(data.scrollDepth.change)}
           iconName="scroll-text"
           tooltip="How far down visitors scroll on your pages on average"
@@ -338,6 +339,7 @@ export default async function UXPage({
           title="Active Time"
           value={formatDuration(data.activeTime.value)}
           change={data.activeTime.change}
+          changeValue={deltaFromPct(data.activeTime.value, data.activeTime.change)}
           trend={getTrend(data.activeTime.change)}
           iconName="clock"
           tooltip="Time visitors actively spend interacting with your site (not idle)"
@@ -346,6 +348,7 @@ export default async function UXPage({
           title="Pages / Session"
           value={data.pagesPerSession.value.toFixed(2)}
           change={data.pagesPerSession.change}
+          changeValue={deltaFromPct(data.pagesPerSession.value, data.pagesPerSession.change)}
           trend={getTrend(data.pagesPerSession.change)}
           iconName="file-text"
           tooltip="Average number of pages a visitor views in one session. Higher means more engagement"
@@ -354,6 +357,7 @@ export default async function UXPage({
           title="Dead Click Rate"
           value={formatPercent(data.deadClickRate.value)}
           change={data.deadClickRate.change}
+          changeValue={deltaFromPct(data.deadClickRate.value, data.deadClickRate.change)}
           trend={getTrend(-data.deadClickRate.change)}
           iconName="mouse-pointer-click"
           tooltip="Percentage of sessions where users clicked on non-clickable elements. Indicates confusing UI"

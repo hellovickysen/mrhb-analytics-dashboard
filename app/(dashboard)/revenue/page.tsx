@@ -4,7 +4,7 @@ import AreaChart, { type AreaChartDataPoint } from '@/components/charts/AreaChar
 import DonutChart, { type DonutChartDataPoint } from '@/components/charts/DonutChart'
 import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
-import { formatNumber, formatPercent } from '@/lib/utils/format'
+import { formatNumber, formatPercent, deltaFromPct } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 
@@ -367,6 +367,7 @@ export default async function RevenuePage({
           title="Total Revenue"
           value={`$${(data.totalRevenue.value / 1000).toFixed(1)}K`}
           change={data.totalRevenue.change}
+          changeValue={deltaFromPct(data.totalRevenue.value, data.totalRevenue.change)}
           trend={getTrend(data.totalRevenue.change)}
           iconName="dollar-sign"
           tooltip="Total money earned from all in-app transactions"
@@ -375,6 +376,7 @@ export default async function RevenuePage({
           title="Transaction Count"
           value={formatNumber(data.transactionCount.value)}
           change={data.transactionCount.change}
+          changeValue={deltaFromPct(data.transactionCount.value, data.transactionCount.change)}
           trend={getTrend(data.transactionCount.change)}
           iconName="filter"
           tooltip="Number of individual transactions completed"
@@ -383,6 +385,7 @@ export default async function RevenuePage({
           title="Avg Transaction Value"
           value={`$${data.avgTransactionValue.value.toFixed(2)}`}
           change={data.avgTransactionValue.change}
+          changeValue={deltaFromPct(data.avgTransactionValue.value, data.avgTransactionValue.change)}
           trend={getTrend(data.avgTransactionValue.change)}
           iconName="trending-up"
           tooltip="Average amount of money per transaction"
@@ -391,6 +394,7 @@ export default async function RevenuePage({
           title="Revenue Growth"
           value={formatPercent(data.revenueGrowth.value)}
           change={data.revenueGrowth.change}
+          changeValue={deltaFromPct(data.revenueGrowth.value, data.revenueGrowth.change)}
           trend={getTrend(data.revenueGrowth.change)}
           iconName="scroll-text"
           tooltip="How much revenue changed compared to the previous period"

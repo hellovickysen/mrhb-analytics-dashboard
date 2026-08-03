@@ -4,7 +4,7 @@ import AreaChart, { type AreaChartDataPoint } from '@/components/charts/AreaChar
 import LineChart, { type LineChartDataPoint } from '@/components/charts/LineChart'
 import BarChart, { type BarChartDataPoint } from '@/components/charts/BarChart'
 import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
-import { formatNumber, formatPercent } from '@/lib/utils/format'
+import { formatNumber, formatPercent, deltaFromPct } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 
@@ -427,6 +427,7 @@ export default async function SeoPage({
           title="Total Impressions"
           value={formatNumber(data.totalImpressions.value)}
           change={data.totalImpressions.change}
+          changeValue={deltaFromPct(data.totalImpressions.value, data.totalImpressions.change)}
           trend={getTrend(data.totalImpressions.change)}
           iconName="search"
           tooltip="How many times your pages appeared in Google search results (from Search Console page data)"
@@ -435,6 +436,7 @@ export default async function SeoPage({
           title="Total Clicks"
           value={formatNumber(data.totalClicks.value)}
           change={data.totalClicks.change}
+          changeValue={deltaFromPct(data.totalClicks.value, data.totalClicks.change)}
           trend={getTrend(data.totalClicks.change)}
           iconName="mouse-pointer-click"
           tooltip="How many times people clicked through from Google search to your site"
@@ -443,6 +445,7 @@ export default async function SeoPage({
           title="Avg CTR"
           value={formatPercent(data.avgCtr.value)}
           change={data.avgCtr.change}
+          changeValue={deltaFromPct(data.avgCtr.value, data.avgCtr.change)}
           trend={getTrend(data.avgCtr.change)}
           iconName="trending-up"
           tooltip="Click-through rate = total clicks / total impressions (impression-weighted). Higher is better"
@@ -451,6 +454,7 @@ export default async function SeoPage({
           title="Avg Position"
           value={data.avgPosition.value.toFixed(1)}
           change={data.avgPosition.change}
+          changeValue={deltaFromPct(data.avgPosition.value, data.avgPosition.change)}
           trend={getTrend(-data.avgPosition.change)}
           iconName="globe"
           tooltip="Average ranking position (impression-weighted). Lower is better (1 = top result)"
