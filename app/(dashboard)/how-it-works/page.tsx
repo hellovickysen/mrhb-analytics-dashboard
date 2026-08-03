@@ -216,6 +216,35 @@ export default async function HowItWorksPage() {
             <li><strong>Avg Rating</strong> — Play-Store listing average; App Store is Not connected.</li>
           </ul>
 
+          <h3 className="mb-2 mt-6 text-sm font-semibold text-mrhb-dark">Onboarding drop-off funnel (new users)</h3>
+          <p className="mb-2 text-xs text-mrhb-dark/60">
+            A <strong>new-user-only</strong> funnel — returning users are excluded. Each stage counts users (summed
+            daily, a ceiling), matched across Android/iOS/web, so the <strong>stage-to-stage ratios</strong> are what
+            matter, not the absolute totals.
+          </p>
+          <ul className="space-y-1.5 text-sm text-mrhb-dark/70">
+            <li>
+              <strong>Started signup</strong> — users who began any signup path:{' '}
+              <code className="rounded bg-mrhb-cream px-1.5 py-0.5 font-mono text-xs text-mrhb-dark/80">*_ONBOARDING_LETS_GO</code>,{' '}
+              <code className="rounded bg-mrhb-cream px-1.5 py-0.5 font-mono text-xs text-mrhb-dark/80">*_ONBOARDING_SOCIAL_SIGNUP</code> or{' '}
+              <code className="rounded bg-mrhb-cream px-1.5 py-0.5 font-mono text-xs text-mrhb-dark/80">*_ONBOARDING_IMPORT_WALLET</code>.
+            </li>
+            <li>
+              <strong>Passcode created</strong> —{' '}
+              <code className="rounded bg-mrhb-cream px-1.5 py-0.5 font-mono text-xs text-mrhb-dark/80">*_SETTINGS_NEW_PASSCODE</code>, the
+              create-6-digit-passcode step every new user hits and returning users never do (the cleanest new-user signal).
+            </li>
+            <li>
+              <strong>Onboarding complete</strong> —{' '}
+              <code className="rounded bg-mrhb-cream px-1.5 py-0.5 font-mono text-xs text-mrhb-dark/80">*_ONBOARDING_GUIDE_COMPLETE</code>.
+            </li>
+          </ul>
+          <p className="mt-2 text-xs text-mrhb-dark/50">
+            The card shows stage-to-stage and overall conversion (Started &rarr; Passcode, Passcode &rarr; Complete,
+            and overall). These are <strong>GA4 signals</strong> and undercount the backend&apos;s registered-signup
+            total, so read them as drop-off ratios, not the authoritative signup count.
+          </p>
+
           <h3 className="mb-2 mt-6 text-sm font-semibold text-mrhb-dark">Tool Usage tabs</h3>
           <p className="mb-2 text-xs text-mrhb-dark/60">
             Each tool&apos;s active users/events come from these event-name patterns (first-match-wins, editable in
