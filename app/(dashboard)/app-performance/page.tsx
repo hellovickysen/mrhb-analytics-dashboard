@@ -432,6 +432,11 @@ export default async function AppPerformancePage({
 }) {
   const data = await getAppPerformanceData(searchParams)
   const rangeLabel = RANGE_LABELS[searchParams?.range ?? '30d'] ?? 'Last 30 Days'
+  const { startDate: rangeStart, endDate: rangeEnd } = getDateWindow(searchParams)
+  const rangeDays = Math.max(
+    1,
+    Math.round((new Date(rangeEnd).getTime() - new Date(rangeStart).getTime()) / 86400000) + 1,
+  )
 
   const funnelBars: BarChartDataPoint[] = data.onboardingFunnel.map((s) => ({ label: s.label, value: s.value }))
   const featureUsageBars: BarChartDataPoint[] = data.featureUsage.map((r) => ({ label: r.feature, value: r.clicks }))
@@ -537,7 +542,7 @@ export default async function AppPerformancePage({
             the top to update every tool&rsquo;s trend. Pick a tool tab to see its cards + daily trend. &ldquo;Active
             Users&rdquo; is summed daily active (a ceiling); mapping is editable in Admin.
           </p>
-          <ToolUsageTabs tools={data.toolTabs} rangeLabel={rangeLabel} />
+          <ToolUsageTabs tools={data.toolTabs} rangeLabel={rangeLabel} rangeDays={rangeDays} />
         </div>
       )}
 
