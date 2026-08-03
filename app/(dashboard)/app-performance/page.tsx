@@ -639,7 +639,7 @@ export default async function AppPerformancePage({
       {/* Feature usage — tile clicks grouped by tool */}
       {featureUsageBars.length > 0 && (
         <div className="mb-6">
-          <BarChart data={featureUsageBars} title="Tile Clicks by Tool" color="#01A6FA" height={340} layout="horizontal" valueLabel="Tile Clicks" />
+          <BarChart data={featureUsageBars} title="Tile Clicks by Tool" color="#01A6FA" height={320} layout="vertical" valueLabel="Tile Clicks" />
         </div>
       )}
 
