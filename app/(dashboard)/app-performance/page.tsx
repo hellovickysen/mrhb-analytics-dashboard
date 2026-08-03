@@ -443,7 +443,18 @@ export default async function AppPerformancePage({
     Math.round((new Date(rangeEnd).getTime() - new Date(rangeStart).getTime()) / 86400000) + 1,
   )
 
-  const funnelBars: BarChartDataPoint[] = data.onboardingFunnel.map((s) => ({ label: s.label, value: s.value }))
+  // Cone geometry for the onboarding drop-off funnel (server-rendered bands,
+  // same inverted-triangle style as the User Journey page).
+  const funnelStages = data.onboardingFunnel
+  const fN = funnelStages.length
+  const F_TOP = 100
+  const F_TIP = 42
+  const fBoundary = (k: number): number => (fN <= 0 ? F_TOP : F_TOP - (k * (F_TOP - F_TIP)) / fN)
+  const FUNNEL_COLORS: { from: string; to: string }[] = [
+    { from: '#015E8C', to: '#0176B0' },
+    { from: '#0E8FB8', to: '#2FA6B0' },
+    { from: '#B07E33', to: '#C28E40' },
+  ]
   // Stage-to-stage conversion for the new-user drop-off funnel.
   const funnelStarted = data.onboardingFunnel[0]?.value ?? 0
   const funnelPasscode = data.onboardingFunnel[1]?.value ?? 0
@@ -561,30 +572,80 @@ export default async function AppPerformancePage({
         </div>
       )}
 
-      {/* New-user onboarding drop-off funnel */}
-      <div className="mb-6">
-        <BarChart data={funnelBars} title="New User Onboarding — Drop-off" color="#01A6FA" height={300} layout="vertical" />
-        {funnelStarted > 0 && (
-          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-            <span className="rounded-full bg-mrhb-blue-light px-2.5 py-1 font-medium text-mrhb-blue">
-              Started → Passcode: {convPct(funnelPasscode, funnelStarted)}%
-            </span>
-            <span className="rounded-full bg-mrhb-blue-light px-2.5 py-1 font-medium text-mrhb-blue">
-              Passcode → Complete: {convPct(funnelComplete, funnelPasscode)}%
-            </span>
-            <span className="rounded-full bg-mrhb-blue px-2.5 py-1 font-medium text-mrhb-white">
-              Overall: {convPct(funnelComplete, funnelStarted)}% of starters finish
-            </span>
-          </div>
-        )}
-        <p className="mt-2 text-xs text-mrhb-dark/50">
-          New-user signup flow only: &ldquo;Started&rdquo; = users who began any path (Let&apos;s Go, Social Signup or
-          Import Wallet); &ldquo;Passcode created&rdquo; = the create-6-digit-passcode step (*_SETTINGS_NEW_PASSCODE)
-          that every new user hits and returning users never do; &ldquo;Onboarding complete&rdquo; =
-          *_ONBOARDING_GUIDE_COMPLETE. Users are summed daily (a ceiling), matched across Android/iOS/web. These are
-          GA4 signals and undercount your backend&apos;s registered-signup total, so read them as drop-off ratios, not
-          the authoritative signup count.
-        </p>
+      {/* New-user onboarding drop-off funnel — cone style */}
+      <div className="mb-6 overflow-hidden rounded-2xl bg-mrhb-white shadow-sm ring-1 ring-mrhb-warm-grey/10">
+        <div className="flex flex-col gap-1 border-b border-mrhb-warm-grey/10 bg-gradient-to-r from-mrhb-blue/5 to-transparent px-6 py-5">
+          <h2 className="text-lg font-semibold text-mrhb-dark">New User Onboarding — Drop-off</h2>
+          <p className="text-xs text-mrhb-dark/50">{rangeLabel} · new-user signup flow only · % of starters</p>
+        </div>
+
+        <div className="px-4 py-8 sm:px-6">
+          {funnelStarted <= 0 ? (
+            <p className="py-10 text-center text-sm text-mrhb-dark/50">No new-user signups in this period.</p>
+          ) : (
+            <div className="mx-auto flex w-full max-w-xl flex-col gap-[3px]">
+              {funnelStages.map((stage, index) => {
+                const colors = FUNNEL_COLORS[index] ?? { from: '#0176B0', to: '#0192D6' }
+                const topW = fBoundary(index)
+                const botW = fBoundary(index + 1)
+                const leftTop = (100 - topW) / 2
+                const rightTop = (100 + topW) / 2
+                const leftBot = (100 - botW) / 2
+                const rightBot = (100 + botW) / 2
+                const clip = `polygon(${leftTop}% 0, ${rightTop}% 0, ${rightBot}% 100%, ${leftBot}% 100%)`
+                const textW = Math.max(46, (topW + botW) / 2 - 3)
+                const shareOfTop = funnelStarted > 0 ? (stage.value / funnelStarted) * 100 : 0
+
+                return (
+                  <div key={stage.label} className="relative h-[96px] w-full">
+                    <div
+                      className="absolute inset-0"
+                      style={{
+                        clipPath: clip,
+                        WebkitClipPath: clip,
+                        backgroundImage: `linear-gradient(135deg, ${colors.from}, ${colors.to})`,
+                      }}
+                    />
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="text-center leading-tight text-white" style={{ width: `${textW}%` }}>
+                        <div className="text-lg font-bold drop-shadow sm:text-xl">{stage.label}</div>
+                        <div className="mt-0.5 text-sm font-bold text-white drop-shadow sm:text-base">
+                          {formatNumber(stage.value)}
+                          <span className="ml-1.5 font-semibold text-white/85">
+                            · {shareOfTop.toFixed(shareOfTop >= 10 ? 0 : 1)}%
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {funnelStarted > 0 && (
+            <div className="mx-auto mt-5 flex max-w-xl flex-wrap items-center justify-center gap-2 text-xs">
+              <span className="rounded-full bg-mrhb-blue-light px-2.5 py-1 font-medium text-mrhb-blue">
+                Started → Passcode: {convPct(funnelPasscode, funnelStarted)}%
+              </span>
+              <span className="rounded-full bg-mrhb-blue-light px-2.5 py-1 font-medium text-mrhb-blue">
+                Passcode → Complete: {convPct(funnelComplete, funnelPasscode)}%
+              </span>
+              <span className="rounded-full bg-mrhb-blue px-2.5 py-1 font-medium text-mrhb-white">
+                Overall: {convPct(funnelComplete, funnelStarted)}% finish
+              </span>
+            </div>
+          )}
+
+          <p className="mx-auto mt-4 max-w-xl text-xs text-mrhb-dark/50">
+            New-user signup flow only: &ldquo;Started&rdquo; = users who began any path (Let&apos;s Go, Social Signup or
+            Import Wallet); &ldquo;Passcode created&rdquo; = the create-6-digit-passcode step (*_SETTINGS_NEW_PASSCODE)
+            that every new user hits and returning users never do; &ldquo;Onboarding complete&rdquo; =
+            *_ONBOARDING_GUIDE_COMPLETE. Users are summed daily (a ceiling), matched across Android/iOS/web. These are
+            GA4 signals and undercount your backend&apos;s registered-signup total, so read them as drop-off ratios, not
+            the authoritative signup count.
+          </p>
+        </div>
       </div>
 
       {/* Ratings */}
