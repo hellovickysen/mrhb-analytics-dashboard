@@ -391,7 +391,7 @@ export default async function OverviewPage({
       {/* KPI cards row — pass iconName strings, not components */}
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <KPICard
-          title="Total Users"
+          title="Total Website Users"
           value={formatNumber(data.totalUsers.value)}
           change={data.totalUsers.change ?? undefined}
           changeValue={deltaFromPct(data.totalUsers.value, data.totalUsers.change)}
