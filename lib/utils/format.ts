@@ -3,34 +3,16 @@
  */
 
 /**
- * Compact number formatting.
- * Examples: 950 -> "950", 1200 -> "1.2K", 3400000 -> "3.4M", 2100000000 -> "2.1B"
+ * Full number formatting with thousands separators (no K/M/B compacting).
+ * Examples: 950 -> "950", 1031 -> "1,031", 3400000 -> "3,400,000", 4.3 -> "4.3"
+ *
+ * Managers asked for exact figures on the cards (and their sub-text), so this
+ * shows the complete number. Fractions are preserved to 1 decimal for the rare
+ * non-integer value; counts render as clean whole numbers.
  */
 export function formatNumber(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return '—'
-
-  const abs = Math.abs(n)
-  const sign = n < 0 ? '-' : ''
-
-  if (abs < 1000) {
-    return `${sign}${abs}`
-  }
-
-  const units = [
-    { value: 1e12, suffix: 'T' },
-    { value: 1e9, suffix: 'B' },
-    { value: 1e6, suffix: 'M' },
-    { value: 1e3, suffix: 'K' },
-  ]
-
-  for (const unit of units) {
-    if (abs >= unit.value) {
-      const formatted = (abs / unit.value).toFixed(1).replace(/\.0$/, '')
-      return `${sign}${formatted}${unit.suffix}`
-    }
-  }
-
-  return `${sign}${abs}`
+  return n.toLocaleString('en-US', { maximumFractionDigits: 1 })
 }
 
 /**
