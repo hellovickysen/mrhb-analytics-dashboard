@@ -1,404 +1,261 @@
 # MRHB Analytics Dashboard — Complete Handover Guide
 
-## For AI Agents / Developers Taking Over This Project
+_Last updated: 2026-08-05. This is the canonical handover reference. Read it fully before making any change._
 
-This document contains everything needed to understand, maintain, and extend the MRHB Analytics Dashboard. Read it fully before making any changes.
+## 0. TL;DR for the AI taking over
 
----
+You are the long-term technical steward of a **decision-grade analytics dashboard** for MRHB Network (Shariah-compliant fintech). The prime directive is **trustworthy reporting**: never present sample/mock data as live, always reconcile a metric against its authoritative source, make **small reversible fixes with an audit trail**, and **ask before** anything irreversible, source-of-truth-altering, credential-rotating, or definition-changing.
 
-## 1. Project Overview
-
-**What:** A unified management dashboard for MRHB Network (Shariah-compliant fintech) that tracks website traffic, app installs, user journeys, SEO, social campaigns, and in-app transactions in one place — like a custom Mixpanel.
-
-**Who:** Built for the MRHB management team. Currently one authorized user: "varun" (cookie-based name auth).
-
-**Where:**
-- **Repo:** https://github.com/hellovickysen/mrhb-analytics-dashboard
-- **Live URL:** https://mrhb-analytics-dashboard-two.vercel.app
-- **Supabase:** Project `mrhb-analytics` (19 PostgreSQL tables)
-
-**Stack:** Next.js 14 (App Router) + TypeScript + Tailwind CSS + Supabase + Vercel + Recharts
-
-**Size:** 44 source files, ~10,500 lines of TypeScript/TSX, 695-line SQL migration
+- **Repo:** `hellovickysen/mrhb-analytics-dashboard` · **Prod:** https://mrhb-analytics-dashboard-two.vercel.app
+- **Stack:** Next.js 14 App Router · TypeScript · Tailwind · Supabase · Vercel (Hobby) · Recharts
+- **You cannot run a local full build or DDL.** You edit files and deploy via the GitHub API; the user applies SQL migrations in Supabase. See §12 (Deploy & Validation) and §13 (DON'T BREAK).
 
 ---
 
-## 2. Architecture
+## 1. Current status (Aug 2026)
 
-```
-                    ┌─────────────────────────────────────────┐
-                    │              Vercel (Hosting)            │
-                    │                                         │
-                    │  ┌─────────────────────────────────┐    │
-                    │  │     Next.js 14 App Router        │    │
-                    │  │                                   │    │
-                    │  │  9 Dashboard Pages (Server Comps) │    │
-                    │  │  + Login Page (Client Comp)       │    │
-                    │  │  + Admin Page (Client Comp)       │    │
-                    │  │                                   │    │
-                    │  │  /api/cron   (daily midnight UTC) │    │
-                    │  │  /api/refresh (manual sync POST)  │    │
-                    │  │  /api/debug  (event inspection)   │    │
-                    │  └──────────────┬────────────────────┘    │
-                    │                 │ reads/writes            │
-                    └─────────────────┼────────────────────────┘
-                                      │
-                    ┌─────────────────▼────────────────────────┐
-                    │           Supabase (PostgreSQL)           │
-                    │                                           │
-                    │  19 tables: ga_traffic, ga_events,        │
-                    │  ga_pages, ga_geo, gsc_queries,           │
-                    │  gsc_pages, play_installs, play_ratings,  │
-                    │  play_store_listing, shortio_links,       │
-                    │  shortio_clicks, clarity_sessions,        │
-                    │  clarity_friction, funnel_stages,          │
-                    │  transactions, revenue, daily_kpis,       │
-                    │  tracked_events, data_sync_log            │
-                    └──────────────────────────────────────────┘
-                                      ▲
-                    ┌─────────────────┘ (API clients fetch & upsert)
-                    │
-        ┌───────────┼───────────┬───────────┬──────────┬──────────┐
-        │           │           │           │          │          │
-   GA4 Website  GA4 App    Search     Short.io    Play Store  App Store
-   (mrhb.net)  (Firebase/  Console               Scraper     Lookup
-               Sahal       (GSC)     (Stats API)  (HTML)      (iTunes)
-               Wallet)
-```
+**Live & real:** Overview, Traffic, SEO, Blog, Social — all reconciled to authoritative sources. App Performance is real (GA4 for Firebase + Play listing), with config-driven metrics, per-tool usage tabs, "Tile Clicks by Tool", and a new-user onboarding drop-off funnel. User Journey funnel is real but **cross-source** (not one cohort). Admin is fully wired (live editors + sync status).
 
-### Data Flow
-1. **Sync triggers:** Daily cron at midnight UTC OR manual POST to `/api/refresh`
-2. **API clients** (`lib/api-clients/`) fetch from external sources
-3. **Ingestion orchestrator** (`lib/ingestion/index.ts`) upserts data into Supabase
-4. **Dashboard pages** (`app/(dashboard)/`) read from Supabase on every page load
-5. **Mock fallback:** Every page falls back to hardcoded mock data if Supabase returns empty
+**Intentionally NOT live (labelled sample / not-connected):**
+- **Revenue** — needs Firebase purchase/revenue events. Never show transaction counts as money.
+- **UX & Friction** — Microsoft Clarity API returns no data → sample.
+- **Funnel Impressions (social/app-store)** — no source yet.
+- **New Users (registered accounts)** — the authoritative figure lives only in the product **backend DB**, which the owner has declined to connect. GA4 proxies undercount it (see §9).
+
+**Owner-side tasks still outstanding (need their action, not code):**
+1. Play **GCS bulk reports** bucket (`pubsite_prod_rev_<id>` + Storage Object Viewer) → real net installs + full star-rating histogram.
+2. **App Store Connect** → iOS installs/ratings/reviews.
+3. **Firebase purchase/revenue events** → Revenue page.
+4. Social / app-store **impressions APIs** → funnel top stage.
 
 ---
 
-## 3. File Structure
+## 2. Prime directive & operating rules
+
+1. **Provenance before display.** A number is not "real" until its source, ingestion, storage, and dashboard calculation are all understood. Reproduce a suspected mismatch first (page, URL range, metric label, observed vs expected), then trace end-to-end before changing code.
+2. **Authoritative source per metric** (see §7). State which source is authoritative when reconciling.
+3. **Distinguish** true defect vs intentional mock vs source limitation vs definition mismatch — before "fixing".
+4. **Mock fallbacks are intentional** for gaps (Clarity, revenue). Keep them clearly labelled as sample/Not connected; never silently present them as live.
+5. **Targeted, reversible changes.** Prefer migrations for DB changes; preserve historical data; never fabricate source values.
+6. **Ask before** irreversible actions, source-of-truth data edits, credential rotation, or reporting-definition changes.
+7. **Leave an audit trail** — a descriptive commit per business-impacting change: what was observed, what changed, why it's correct, what's still uncertain.
+
+---
+
+## 3. Architecture & data flow
 
 ```
-mrhb-analytics/
-├── app/
-│   ├── layout.tsx                    # Root layout, metadata, favicon
-│   ├── globals.css                   # Tailwind + Syne font
-│   ├── login/page.tsx                # Login page ('use client')
-│   ├── (dashboard)/
-│   │   ├── layout.tsx                # Sidebar + mobile hamburger ('use client')
-│   │   ├── page.tsx                  # Overview (Server Component)
-│   │   ├── traffic/page.tsx          # Traffic & Acquisition
-│   │   ├── funnel/page.tsx           # User Journey & Funnel
-│   │   ├── ux/page.tsx               # UX & Friction (Clarity)
-│   │   ├── social/page.tsx           # Social & Campaigns (Short.io)
-│   │   ├── app-performance/page.tsx  # App Performance (Firebase)
-│   │   ├── seo/page.tsx              # SEO (Search Console)
-│   │   ├── blog/page.tsx             # Blog Analytics
-│   │   ├── revenue/page.tsx          # Revenue & Transactions
-│   │   └── admin/page.tsx            # Admin Panel ('use client')
-│   └── api/
-│       ├── cron/route.ts             # Daily sync (Vercel cron)
-│       ├── refresh/route.ts          # Manual sync POST endpoint
-│       └── debug/route.ts            # Event inspection endpoint
-├── components/
-│   ├── layout/
-│   │   ├── Sidebar.tsx               # Navigation + user profile + sync
-│   │   └── Header.tsx                # Title + date range picker (5 options)
-│   ├── cards/
-│   │   ├── KPICard.tsx               # KPI card with tooltip + trend
-│   │   └── StatCard.tsx              # Simple stat display
-│   ├── charts/
-│   │   ├── LineChart.tsx             # Recharts line chart
-│   │   ├── AreaChart.tsx             # Recharts area chart (dual series)
-│   │   ├── BarChart.tsx              # Recharts bar chart
-│   │   ├── DonutChart.tsx            # Recharts donut/pie chart
-│   │   └── FunnelChart.tsx           # Custom CSS funnel (not Recharts)
-│   ├── tables/
-│   │   └── DataTable.tsx             # Sortable data table
-│   └── ui/
-│       └── Tabs.tsx                  # Tab switcher
-├── lib/
-│   ├── api-clients/
-│   │   ├── google-auth.ts            # Shared JWT auth for Google APIs
-│   │   ├── google-analytics.ts       # GA4 Data API v1 (website + app)
-│   │   ├── search-console.ts         # Search Console API
-│   │   ├── play-console.ts           # Play Developer API (optional)
-│   │   ├── shortio.ts                # Short.io REST + Stats API
-│   │   ├── clarity.ts                # Microsoft Clarity (limited)
-│   │   └── store-scraper.ts          # Play Store + App Store scraper
-│   ├── ingestion/
-│   │   ├── index.ts                  # Orchestrator (runs all sources)
-│   │   └── supabase-admin.ts         # Service-role upsert helper
-│   ├── supabase/
-│   │   ├── client.ts                 # Browser Supabase client
-│   │   └── server.ts                 # Server client + service client
-│   ├── types/
-│   │   └── index.ts                  # All TypeScript types
-│   └── utils/
-│       ├── format.ts                 # Number/date/percent formatters
-│       ├── date-range.ts             # Date window calculator
-│       └── logo.ts                   # MRHB logo as base64 data URI
-├── supabase/
-│   └── migrations/
-│       └── 001_initial_schema.sql    # 19 tables, 695 lines
-├── middleware.ts                      # Auth guard (cookie check)
-├── next.config.js                    # missingSuspenseWithCSRBailout: false
-├── tailwind.config.ts                # MRHB brand colors
-├── vercel.json                       # Daily cron schedule
-└── .env.example                      # All env var names
+External sources ──(API clients)──> Ingestion orchestrator ──(service-role upsert)──> Supabase (Postgres)
+                                                                                          │
+                                              Dashboard pages (server components) reads ──┘
+```
+
+- **Sync triggers:** daily Vercel cron `0 0 * * *` (midnight UTC) → `/api/cron`; or manual `POST /api/refresh {source, daysBack}` (the Sidebar "Sync" button; self-heals after a DB pause on the next run).
+- **"Sync" vs "Refresh":** Sidebar **Sync** = real ingestion (`POST /api/refresh`). Header **Refresh** = `router.refresh()` (re-reads current data, no ingestion).
+- **Reads:** every dashboard page reads Supabase via `createServiceClient()` (service role, bypasses RLS). RLS is on with no policies → only service role reads.
+- **Mock fallback:** each page falls back to a clearly-labelled `MOCK_*` when a source is empty/errors.
+
+---
+
+## 4. File structure (key/current)
+
+```
+app/(dashboard)/
+  page.tsx                      Overview (server)
+  traffic|seo|blog|social/page  authoritative, reconciled (server)
+  funnel/page.tsx               User Journey cone (server, cross-source)
+  app-performance/page.tsx      App (GA4 Firebase + Play), config-driven (server)
+  ux/page.tsx                   Sample (Clarity)   revenue/page.tsx  Sample
+  how-it-works/page.tsx         Plain-English KPI reference (server, live config)
+  admin/page.tsx                Editors + sync status (CLIENT)
+  layout.tsx                    Sidebar shell (CLIENT)
+app/api/
+  cron/route.ts  refresh/route.ts  last-sync/route.ts  freshness/route.ts
+  admin/{tracked-events,tool-config,sync-status,app-metrics}/route.ts   (service-role GET/POST configs)
+components/
+  layout/{Sidebar,Header}.tsx           CLIENT; Header owns range picker + range cookie
+  cards/KPICard.tsx                     CLIENT; iconName curated map; %+delta+"vs prev period"
+  charts/{Line,Area,Bar,Donut,Funnel}Chart.tsx   CLIENT (BarChart layout prop is inverted vs Recharts internally)
+  app-performance/ToolUsageTabs.tsx     CLIENT; per-tool tabs + All Tools overview + Avg Daily Users
+  tables/DataTable.tsx
+lib/
+  api-clients/… google-auth, google-analytics, ga4-app-active-total, search-console,
+                play-console, play-reviews, shortio, clarity, store-scraper
+  ingestion/index.ts            getDateWindow(daysBack) here is INGESTION-only; different from utils/date-range
+  config/tool-usage.ts          DEFAULT_TOOL_MAPPINGS, computeToolTabs, toolForEventName, platformOf
+  config/app-metrics.ts         DEFAULT_APP_METRICS, matchesAppMetric, resolveAppMetrics
+  supabase/server.ts            createServiceClient()
+  utils/date-range.ts           getDateWindow(searchParams) → {startDate,endDate,prevStartDate,prevEndDate,days,range}
+  utils/format.ts               formatNumber (FULL numbers, comma-grouped), formatPercent, deltaFromPct, …
+supabase/migrations/            001_initial · 002_tracked_events(funnel_stage) · 003_tool_usage_config · 004_app_metric_map
+middleware.ts                   cookie auth guard (all pages 307-redirect to /login when unauthed)
+vercel.json                     cron: 0 0 * * *  (see §13 — do NOT make it more frequent on Hobby)
 ```
 
 ---
 
-## 4. Critical Patterns & Rules
+## 5. Critical patterns & rules
 
-### Server/Client Component Boundary (MOST COMMON BUG SOURCE)
-- Dashboard pages are **Server Components** (NO `'use client'`)
-- Components in `components/` are **Client Components** (`'use client'`)
-- **NEVER pass functions or React components as props** from server to client
-- Icons use the `iconName` string pattern — KPICard resolves icons internally via ICON_MAP
-- The `experimental.missingSuspenseWithCSRBailout: false` in next.config.js is required because Header uses `useSearchParams()`
-
-### Date Range
-- Header buttons update URL search params (`?range=today|yesterday|7d|30d|90d`)
-- Pages read `searchParams.range` and pass to `getDateWindow()` from `lib/utils/date-range.ts`
-- All Supabase queries use `.gte('date', startDate)` from the date window
-- Previous period comparison: same length window before startDate
-
-### Supabase Access
-- Dashboard pages use `createServiceClient()` (service role key, bypasses RLS)
-- RLS is enabled on all tables with no policies — only service role can read/write
-- Ingestion uses `lib/ingestion/supabase-admin.ts` (also service role)
-- All upserts use `onConflict` with table-specific conflict columns
-
-### Mock Data Fallback
-- Every page has a `MOCK_*` constant with realistic placeholder data
-- If Supabase returns empty/error, mock data renders seamlessly
-- This ensures the UI always works even before data is synced
+- **Server/Client boundary (top bug source):** dashboard pages are server components; anything interactive lives in `components/` as `'use client'`. Never pass functions/React components server→client. Icons pass as `iconName` string (KPICard resolves via a **curated ICON_MAP** — only add a lucide icon to that map before using a new `iconName`, or it silently falls back to Users).
+- **Date semantics:** `getDateWindow(searchParams)` (in `lib/utils/date-range.ts`) returns inclusive `startDate`/`endDate`, previous-period boundaries, `days`, and `range`. Every page/report/chart must use equivalent inclusive/exclusive semantics and explain prior-period baselines the same way. (Note the identically-named `getDateWindow(daysBack:number)` inside `lib/ingestion/index.ts` is a different function — don't confuse them.)
+- **Range persistence:** Header writes a session cookie `mrhb_range` and restores it when the URL has no `?range=`; Sidebar carries the active range on every nav link. Pages remain the source of truth via the URL param.
+- **Config-driven metrics (App Performance):**
+  - `app_metric_map` (migration 004) defines metric blocks (patterns + match_type). `resolveAppMetrics(rows)` merges DB over `DEFAULT_APP_METRICS`; `matchesAppMetric(def, NAMEUPPER)` classifies events. Editing a block in **Admin → App Performance Metrics** re-derives every card that uses it.
+  - `tool_usage_config` (migration 003) defines tool→event patterns; `computeToolTabs` and `toolForEventName` (first-match-wins by sortOrder) drive the tool tabs AND the "Tile Clicks by Tool" chart. Editable in **Admin → Tool Usage Mapping**.
+- **KPI cards:** pass `value` (string via `formatNumber`), `change` (%), `changeValue` (absolute delta via `deltaFromPct(value, change)`), `trend`. KPICard shows the % + absolute delta top-right and derives the **previous-period value** in-card (`previous = changeValue ÷ (change/100)`) for the "vs N previous period" line. Cards without a baseline correctly show no delta.
+- **Numbers:** `formatNumber` shows FULL comma-grouped numbers (no K/M/B) everywhere — KPI values, sub-text, tables, funnels, tool tabs. Chart **axis ticks** keep their own compact `k` formatter (intentional).
+- **Pagination:** Supabase caps ~1000 rows/request. Any `ga_events`/`gsc_pages` scan MUST paginate with `.range(from, from+PAGE-1)` in a loop. Not paginating silently truncates and undercounts.
 
 ---
 
-## 5. Environment Variables
+## 6. Environment variables (names only — never print values)
 
-```
-# Supabase
-NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
-SUPABASE_SERVICE_ROLE_KEY=eyJ...
-
-# Google (shared service account for GA4 + GSC)
-GA4_PROPERTY_ID=xxx                    # mrhb.network website
-GA4_APP_PROPERTY_ID=292950442          # Sahal Wallet Firebase app
-GOOGLE_SERVICE_ACCOUNT_EMAIL=xxx@xxx.iam.gserviceaccount.com
-GOOGLE_PRIVATE_KEY="-----BEGIN..."
-GSC_SITE_URL=https://mrhb.network
-
-# Short.io
-SHORTIO_API_KEY=sk_xNwQjcMRHC4EX97u   # SECRET key (not public)
-SHORTIO_DOMAIN=mrhbnetwork.short.gy
-
-# App Store tracking (no API key needed)
-PLAY_PACKAGE_NAME=sahal.wallet.app
-APP_STORE_ID=1602366920
-
-# Microsoft Clarity (limited, mostly returns 0)
-CLARITY_API_TOKEN=xxx
-CLARITY_PROJECT_ID=xxx
-
-# Cron auth
-CRON_SECRET=xxx
-```
+Supabase: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
+Google: `GA4_PROPERTY_ID` (website), `GA4_APP_PROPERTY_ID=292950442` (Sahal Wallet Firebase), `GOOGLE_SERVICE_ACCOUNT_EMAIL`, `GOOGLE_PRIVATE_KEY`, `GSC_SITE_URL=https://mrhb.network`. Android Publisher scope enabled (GCP project 579352547101; service account `mrhb-analytics-dashboard@mrhb-analytics.iam.gserviceaccount.com`).
+Short.io: `SHORTIO_API_KEY` (secret), `SHORTIO_DOMAIN=mrhbnetwork.short.gy`.
+Stores: `PLAY_PACKAGE_NAME=sahal.wallet.app`, `APP_STORE_ID=1602366920` (Russian storefront required). Clarity: `CLARITY_API_TOKEN`, `CLARITY_PROJECT_ID` (returns no data). Cron: `CRON_SECRET`.
 
 ---
 
-## 6. Firebase Event Schema (CRITICAL KNOWLEDGE)
+## 7. Data sources — authoritative mapping
 
-### Naming Convention
-```
-Prefix: {action_letter}{platform_letter}_{identifier}
-Action: E=event, S=screen view
-Platform: A=Android, I=iOS, W=web, E=extension
-
-Examples:
-  EA_SEND_SENTx        = Android send transaction
-  EI_SEND_SWAPxLIFI    = iOS swap via LiFi
-  SA_APP_DASHBOARD     = Android screen: app dashboard
-  SI_GET_STARTED       = iOS screen: get started
-  EW_ONBOARDING_*      = Web/cross-platform onboarding events
-```
-
-### CTA Click Events
-```
-Footer: EA_{ButtonNum}_F_{ScreenPrefix}_{Heading}_{ButtonText}
-Popup:  EA_{ButtonNum}_P_{ScreenPrefix}_{Heading}_{ButtonText}
-Tiles:  EA_T_{TilesType}_{Heading}_{ButtonText}
-  TilesType: AppScreen | PersonalizeWallet | MIROStaking | MRHBStore
-```
-
-### Transaction Events (confirmed by dev team)
-```
-Send:        EA_SEND_SENTx / EI_SEND_SENTx
-Swap LiFi:   EA_SEND_SWAPxLIFI / EI_SEND_SWAPxLIFI
-Swap SkipGo: EA_SEND_SWAPxSKIP_GO / EI_SEND_SWAPxSKIP_GO
-Swap ChgNow: EA_SEND_SWAPxCHANGE_NOW / EI_SEND_SWAPxCHANGE_NOW
-Stake:       EA_SEND_SAHAL_STAKEx / EI_SEND_SAHAL_STAKEx
-Give:        EA_SEND_SAHAL_GIVEx / EI_SEND_SAHAL_GIVEx
-Store:       EA_SEND_MRHB_STOREx / EI_SEND_MRHB_STOREx
-Screener:    EA_SEND_HALAL_SCREENERx
-Emplifai:    EA_SEND_EMPLIFAIx / EI_SEND_EMPLIFAIx
-
-Note: Dashes become 'x' in event names. Total 90d: 526 transactions.
-```
-
-### Onboarding Events
-```
-EW_ONBOARDING_LETS_GO          (47)  — tapped "Let's Go"
-EW_ONBOARDING_GUIDE_SKIP       (26)  — skipped guide
-EW_ONBOARDING_GUIDE_START      (12)  — tapped "Learn More"
-EW_ONBOARDING_GUIDE_COMPLETE   (55)  — finished full onboarding
-EW_ONBOARDING_SOCIAL_SIGNUPx*  (3)   — social signup (Google/Twitter/Apple)
-EW_ONBOARDING_IMPORT_WALLET    (1)   — imported wallet
-```
-
-### Referral Events
-```
-EA_REF_SHARED_{code}  — user shared their referral code
-EA_REF_BY_{code}      — user was referred by someone
-```
-
-### Key System Events
-```
-first_open:    1,113  — Firebase auto-event, first app launch after install
-session_start: 13,155 — all sessions
-first_visit:   1,334  — first website visit
-app_remove:    969    — app uninstalls
-app_update:    665    — app updates
-```
+| Metric area | Authoritative source | Notes / gotchas |
+|---|---|---|
+| Website users/sessions/traffic | **GA4 website** (`GA4_PROPERTY_ID`) | activeUsers/totalUsers are **de-duplicated & non-additive** — NEVER sum across days. Use stored `daily_kpis` for per-range totals. |
+| App active users | **GA4 for Firebase** (`GA4_APP_PROPERTY_ID`) via `fetchGA4AppActiveUsersTotal` | de-duplicated period total (no date dimension). Don't sum daily session_start users. |
+| App installs | **Play Store** (real, pending GCS) / GA4 `first_open` (proxy now) | `first_open` ≈ install proxy, undercounts store; NOT a verified install count. |
+| App events (onboarding, tools, tx) | **GA4 for Firebase** `ga_events` | paginate; match across platforms (SA_/SI_/SW_ screens, EA_/EI_/EW_ actions). |
+| SEO impressions/clicks/position | **Search Console** (`gsc_pages`, page dimension) | weighted CTR/position; page dim more complete than anonymized query dim. |
+| Social link clicks | **Short.io** (`mrhbnetwork.short.gy`) | distinguish human vs bot/aggregate. |
+| Play rating | **Play listing** (`play_ratings`) | avg + total only; per-star histogram is 0 (needs GCS bulk reports). |
+| Revenue | **Not configured** | needs Firebase purchase/revenue events. |
+| UX/friction | **Clarity** | API returns no data → sample. |
+| Registered users / new signups | **Product backend DB (NOT connected — owner declined)** | GA4 proxies undercount; see §9. |
 
 ---
 
-## 7. Funnel Stage Mapping
+## 8. Firebase event taxonomy (from dev-team PDF, current schema)
 
-| Stage | Data Source | Query |
-|-------|-----------|-------|
-| 1. Social Discovery | shortio_clicks | WHERE link_id='domain_total', SUM total_clicks |
-| 2. Website Visit | ga_traffic | WHERE channel IN ('Social','Referral','Organic Social'), SUM sessions |
-| 3. App Install | ga_events | WHERE event_name='first_open', SUM event_count |
-| 4. Onboarding Started | ga_events | WHERE event_name LIKE 'EW_ONBOARDING_LETS_GO%' OR 'EW_ONBOARDING_SOCIAL_SIGNUP%' OR 'EW_ONBOARDING_IMPORT_%' OR 'EW_ONBOARDING_GUIDE_SKIP%' |
-| 5. Wallet Created | ga_events | WHERE event_name='SA_APP_DASHBOARD', SUM event_count |
-| 6. Onboarding Complete | ga_events | WHERE event_name='EW_ONBOARDING_GUIDE_COMPLETE' |
-| 7. Transactions | ga_events | WHERE event_name LIKE 'EA_SEND_%' OR 'EI_SEND_%' OR 'EW_SEND_%' |
-| 8. Retained (7d) | ga_events | WHERE event_name='session_start' AND date >= 7 days ago |
+Schema (post 25-May-2026 update): `EA_F_{identifier}` style. First letter **E**=event / **S**=screen; second letter **A**=Android / **I**=iOS / **W**=web / **E**=extension. Separator between params is a single `_` (older `__` / `SCREEN__ANDROID__…` variants may still appear in historical rows — match with `includes`, uppercased).
 
-**Important:** The funnel uses `capToFunnelShape()` to ensure monotonic decreasing values. Later stages are capped to the previous stage's value.
+- **Screens:** `SA_/SI_/SW_ …` (e.g. `SA_APP_DASHBOARD`, `SA_GET_STARTED`, `SA_SETTINGS_NEW_PASSCODE`).
+- **Actions:** `EA_/EI_/EW_ …`. Types: `_F_`=footer, `_P_`=popup, `_T_`=tile click (e.g. `EA_T_APPSCREEN_EMPLIFAI`).
+- **Transactions:** `EA_SEND_…` / `EI_SEND_…` families (SENTx, SWAPxLIFI, SWAPxSKIP_GO, SAHAL_STAKEx, SAHAL_GIVEx, MRHB_STOREx, …). Dashes become `x`.
+- **Onboarding:** entry = `*_ONBOARDING_LETS_GO` / `*_ONBOARDING_SOCIAL_SIGNUPx{svc}` / `*_ONBOARDING_IMPORT_WALLET`; **create-passcode** = `*_SETTINGS_NEW_PASSCODE` (only NEW users hit it — returning users enter an existing passcode → the cleanest new-user signal); complete = `*_ONBOARDING_GUIDE_COMPLETE`.
+- `first_open` = install proxy (NOT a store-verified install).
 
 ---
 
-## 8. Data Sources Status
+## 9. App Performance deep-dive
 
-| Source | Rows (90d) | Status | Notes |
-|--------|-----------|--------|-------|
-| GA4 Website (mrhb.network) | 217 traffic + 248 events + 1,034 geo | REAL | Full website analytics |
-| GA4 App (Sahal Wallet Firebase) | 23,812 events | REAL | In-app events, transactions, screen views |
-| Google Search Console | 2,219 queries + 2,551 pages | REAL | SEO rankings and clicks |
-| Short.io | 1 link + 145 clicks | REAL | Social campaign tracking, human vs bot |
-| Play Store scraper | 1 install + 1 rating | REAL | 100K+ installs, 4.3 rating, no API key needed |
-| App Store lookup | Fetched on demand | REAL | 4.58 rating, 19 ratings, iTunes API |
-| Play Console | 1 install + 1 rating | REAL | Dev team granted view-only access |
-| Microsoft Clarity | 0 rows | MOCK | API limited, falls back to mock data |
-
-**Total: ~30,228 rows in Supabase**
+- **KPI cards:** Total Installs (latest Play badge snapshot — **never summed**; falls back to `first_open` proxy), Active Users (de-dup GA4 app), Avg Rating (Play; App Store not connected), Onboarding Rate (onboarding-complete users ÷ first_open, approx), Transaction Rate (transacting users ÷ dashboard users).
+- **Onboarding drop-off funnel** (cone, new-user-only): Started (`LETS_GO`|`SOCIAL_SIGNUP`|`IMPORT_WALLET`) → Passcode created (`SETTINGS_NEW_PASSCODE`) → Onboarding complete (`ONBOARDING_GUIDE_COMPLETE`). Shows % continue between bands + conversion chips. Counts are **summed-daily ceilings** (labelled). ~30d: 408 → 134 → 99 (33% → 74%, overall 24%).
+- **Tool Usage tabs + Tile Clicks by Tool:** grouped by `tool_usage_config`; per-tool Active Users / Avg Daily Users / Events / platform split / range-aware trend; "All Tools" overview first.
+- **New Users reconciliation (important):** dev backend reported 355 new users (30d); GA4 `first_open`=259, `SETTINGS_NEW_PASSCODE`=134 — **all undercount** the backend (consent/opt-out, sampling, web/extension signups, funnel drop-off). Authoritative "New Users" = backend DB, which the owner declined to connect. So we present GA4 as **drop-off ratios / proxy**, never as the authoritative signup count.
 
 ---
 
-## 9. Pages — Real vs Mock Data
+## 10. Pages — real vs mock (current)
 
-| Page | Real Data Sources | Mock Sections |
-|------|------------------|---------------|
-| Overview | GA4 traffic/geo, GSC clicks, Short.io human clicks, Firebase first_open | Scroll depth (Clarity), Revenue |
-| Traffic | GA4 traffic + geo | None — fully real |
-| SEO | GSC queries + pages | None — fully real |
-| Blog | GA4 pages filtered to /blogs/, GSC blog queries | Traffic by source (approximated) |
-| Funnel | Short.io, GA4 traffic, Firebase events (all 8 stages) | None — fully real |
-| UX & Friction | None | All mock (Clarity 0 rows) |
-| Social | Short.io clicks, referrers, countries, OS | None — fully real |
-| App Performance | Firebase events, store scraper | Crash rate, reviews (mock) |
-| Revenue | None | All mock (no revenue events configured) |
-| Admin | Static config UI | N/A |
-
----
-
-## 10. MRHB Brand
-
-```
-Colors:
-  Blue (primary):  #01A6FA  → Tailwind: mrhb-blue
-  Dark (text):     #29231D  → Tailwind: mrhb-dark
-  Cream (bg):      #FEF8EF  → Tailwind: mrhb-cream
-  Light Blue:      #D0EFFF  → Tailwind: mrhb-blue-light
-  Warm Grey:       #BFB4A6  → Tailwind: mrhb-warm-grey
-  Warm Tan:        #E5B897  → Tailwind: mrhb-warm-tan
-  White:           #FFFFFF  → Tailwind: mrhb-white
-
-Font: Syne (Google Fonts) — SemiBold for headings, Regular for body
-Logo: Embedded as base64 data URI in lib/utils/logo.ts (gold octagonal badge)
-```
+| Page | Real | Sample / Not connected |
+|---|---|---|
+| Overview | Total Website Users, App Installs (proxy), Organic Clicks, Social Human Clicks, Wallet Active Users | Revenue (Not configured) |
+| Traffic | all (GA4 website) | — |
+| SEO | all (Search Console) | — |
+| Blog | views (GA4), search impressions (GSC) | — |
+| Social | all (Short.io) | — |
+| User Journey | Impressions(web), Clicks, App Installs, Transaction | Revenue, social/app-store impressions (Not connected). Cross-source, not a cohort. |
+| App Performance | installs/active/rating/rates, tools, onboarding funnel | full star histogram (0), App Store (Not connected) |
+| UX & Friction | — | all (Clarity sample) |
+| Revenue | — | all (not configured) |
 
 ---
 
-## 11. Known Issues & Tech Debt
+## 11. Migrations
 
-1. **Clarity API returns 0 data** — the export API is limited. UX page is fully mock.
-2. **Revenue page is mock** — needs Firebase purchase events with `value` param configured in the app.
-3. **ga_pages table has 0 rows** — GA4 website property may not report pagePath/pageTitle dimensions.
-4. **Short.io FK constraint was manually dropped** — `ALTER TABLE shortio_clicks DROP CONSTRAINT shortio_clicks_link_id_fkey` was run to allow aggregate click rows.
-5. **PLAY_PACKAGE_NAME** — was `com.mrhb.sahalwallet` (404s), corrected to `sahal.wallet.app`.
-6. **App Store lookup requires country=ru** — the app is listed in the Russian store, other country codes return 0 results.
-7. **Logo embedded as data URI** — GitHub API couldn't upload binary PNG correctly, so logo is base64-encoded in `lib/utils/logo.ts`.
-8. **Date picker 100% change issue** — when data only exists for the current period (not the previous comparison period), change % shows 100%.
+| File | Adds | Status |
+|---|---|---|
+| 001_initial_schema.sql | base tables | applied |
+| 002 tracked_events (+funnel_stage) | funnel event config | applied |
+| 003_tool_usage_config.sql | tool→event mapping (13 tools seeded) | **applied** |
+| 004_app_metric_map.sql | App Performance metric blocks (6 seeded) | **applied** |
 
----
-
-## 12. How to Sync Data
-
-### Manual sync (all sources):
-```powershell
-Invoke-RestMethod -Uri "https://mrhb-analytics-dashboard-two.vercel.app/api/refresh" -Method POST -ContentType "application/json" -Body '{"source": "all", "daysBack": 90}'
-```
-
-### Sync specific source:
-```powershell
-# Options: ga4, gsc, play, shortio, clarity
-Invoke-RestMethod -Uri "https://mrhb-analytics-dashboard-two.vercel.app/api/refresh" -Method POST -ContentType "application/json" -Body '{"source": "ga4", "daysBack": 30}'
-```
-
-### Debug event names:
-```
-GET https://mrhb-analytics-dashboard-two.vercel.app/api/debug
-```
-
-### Auto sync:
-Vercel cron runs daily at midnight UTC (configured in vercel.json).
+All config APIs are resilient to a missing table (fall back to code defaults), so the app never hard-fails if a migration is pending. **You cannot run DDL** — write the migration file and ask the user to run it in the Supabase SQL editor.
 
 ---
 
-## 13. Remaining Roadmap
+## 12. Deploy & validation workflow (how YOU ship)
 
-### High Priority
-- [ ] Wire Revenue page to Firebase transaction events (EA_SEND_* with event_value)
-- [ ] Add dark mode toggle
-- [ ] Upgrade Next.js to 15+ (current 14.2.21 has security advisory)
-- [ ] Upgrade Recharts to v3 (v2 is deprecated)
+You have no local full build and no DB/DDL/SSH (sandbox is HTTP/HTTPS only). Workflow:
 
-### Medium Priority
-- [ ] Add X/Twitter analytics page (if API access obtained)
-- [ ] Implement Clarity CSV upload as alternative to limited API
-- [ ] Add email/Slack alerts for metric threshold breaches
-- [ ] Add export to CSV/PDF for each dashboard page
-- [ ] Wire Admin page event config to actually save to tracked_events table
+1. Edit files under `/tmp/mrhb-build/repo/` (fetch any file you don't have via `github__get_file_contents`).
+2. **Validate before every push** (a build failure leaves prod on the last-good build and both old/new return 307, so HTTP can't tell them apart):
+   - **esbuild** for syntax/JSX: `/tmp/esb/node_modules/.bin/esbuild "<file>" --jsx=automatic --bundle=false --format=esm --loader:.tsx=tsx > /dev/null`
+   - **tsc** (strict) on self-contained modules + a stubbed **TS2304 "Cannot find name"** scan for undefined identifiers.
+   - **grep** for stale references after deleting/renaming symbols, and confirm every used import exists.
+   - Watch for **unused locals** when you remove the last use of a var (remove the declaration too).
+3. Compose params with a Node script that reads files from disk (avoid pasting big content); push via `github__push_files` — **the commit-message key is `message`** (not `commit_message`); multiple files per commit supported. Delete with `github__delete_file`.
+4. After deploy (~60–90s), verify routes respond (307 = healthy auth redirect; 500 = runtime error). For data checks you can't see behind auth, use a **temporary read-only debug route**, read it, then **delete it** to keep prod clean.
 
-### Low Priority
-- [ ] Replace name-based auth with Supabase Auth (email + password)
-- [ ] Add team member management (multiple users)
-- [ ] Add custom date range picker (calendar UI)
-- [ ] Optimize Supabase queries with materialized views for heavy aggregations
-- [ ] Add loading skeletons for page transitions
+---
+
+## 13. HARD CONSTRAINTS — DON'T BREAK
+
+1. **Vercel Hobby cron ≤ once/day.** `vercel.json` cron must stay `0 0 * * *`. A more frequent schedule makes Vercel **reject every deployment** (this once froze prod ~13h). If more frequent syncs are needed, use an external scheduler hitting `/api/refresh`, not the cron.
+2. **Never sum de-duplicated GA4 users** across days (website or app). Use per-range de-dup totals (`daily_kpis`, `fetchGA4AppActiveUsersTotal`).
+3. **`play_installs` stores the cumulative Play badge** (e.g. 100,000) snapshotted daily. Use the **latest snapshot only — never SUM** (summing produced millions once).
+4. **Paginate** all `ga_events`/`gsc_pages` reads (1000-row cap).
+5. **tsconfig target < ES2015, `downlevelIteration` OFF.** Do NOT use `for..of`/spread over `Map`/`Set` — use `Array.from(map.entries()/values()/keys())`. (Arrays are fine.)
+6. **Server/client boundary** — see §5. New `iconName`s must be added to KPICard's ICON_MAP.
+7. **Keep mock/sample states clearly labelled.** Never relabel Revenue/UX/Clarity/impressions as live.
+8. **first_open is a proxy**, not verified installs. Transaction event counts are **not revenue**.
+9. **You can't apply DDL** — ship a migration file + ask the user.
+10. **Ask before** reporting-definition changes, source-of-truth edits, credential rotation, irreversible actions.
+
+---
+
+## 14. Bugs fixed / decisions (session log, Aug 2026)
+
+- **Cron freeze (~13h):** `vercel.json` had been set to `0 */6 * * *` → exceeded Hobby limit → all deploys rejected. Reverted to `0 0 * * *`.
+- **App Performance catastrophic overcount:** page summed `play_installs.installs` (cumulative badge) → millions. Fixed to latest snapshot. Active Users was `session_start` count (sessions, ~3663) not de-dup users (~1073) → switched to `fetchGA4AppActiveUsersTotal`. Onboarding/Transaction used wrong platform prefixes (EW_ vs EA_) reading ~0 → fixed. `ga_events` reads weren't paginated → fixed.
+- **Build failure:** referenced `rangeLabel` before defining it → added `RANGE_LABELS`. Lesson → the esbuild+TS2304 pre-push validation in §12.
+- **Real last-sync time:** replaced hardcoded "2 minutes ago" with `/api/last-sync` (reads `data_sync_log`).
+- **Funnel rework:** 5-stage cross-source cone (Impressions→Clicks→App Installs→Transaction→Revenue), brand colours, honest cross-source labelling. (A "polished cone with connectors" variant was built then reverted on request; the same cone style was applied to the App Performance onboarding funnel and kept.)
+- **KPI cards:** added absolute delta + "vs N previous period" (derived in-card); `formatNumber` switched to full comma-grouped numbers.
+- **Tool usage:** 13 tools, tabbed with Avg Daily Users; "Feature Usage" regrouped from raw event names to **Tile Clicks by Tool** (fixed duplicate MIRO/EMPLIFAI + unreadable labels).
+- **Config-driven metrics + How-it-works page** added; Admin editors wired to real config APIs; migrations 003/004 applied by owner.
+- **Renames:** Overview "Total Users" → "Total Website Users".
+
+---
+
+## 15. Roadmap (post-handover)
+
+High: connect Play GCS bulk reports (real installs + star histogram); App Store Connect; Firebase revenue events; decide New-Users source (owner declined backend — GA4 proxy stays labelled). Medium: social/app-store impressions APIs; CSV/PDF export; alerting. Low: Supabase Auth (replace cookie name auth); Next.js 15 upgrade; Recharts v3.
+
+---
+
+## 16. Brand
+
+Blue `#01A6FA` (mrhb-blue), Dark `#29231D` (mrhb-dark), Cream `#FEF8EF` (mrhb-cream), Light-blue `#D0EFFF`, Warm-grey `#BFB4A6`, Warm-tan `#E5B897`. Font **Syne**. Keep the established visual language unless a change is explicitly requested.
+
+---
+
+## 17. Successor AI — recommended system prompt
+
+> You are the long-term technical steward for the **MRHB Analytics Dashboard**, a management analytics product for **MRHB Network**, a Shariah-compliant fintech.
+>
+> **Mission:** trustworthy, decision-grade reporting. Treat each metric as a contract between an authoritative source, ingestion, Supabase storage, dashboard logic, and a manager's interpretation. Never conceal a data gap with a mock fallback, and never call a number real until its provenance is clear.
+>
+> **Project:** repo `hellovickysen/mrhb-analytics-dashboard`; prod `mrhb-analytics-dashboard-two.vercel.app`; Next.js 14 App Router + TypeScript + Tailwind + Supabase + Vercel (Hobby) + Recharts. Brand: MRHB (blue `#01A6FA` / tan / dark `#29231D`; Syne font) — keep the visual language unless a change is requested. **Always read HANDOVER.md before any material change.**
+>
+> **Architecture guardrails:** Dashboard pages are server components; interactive pieces are client components under `components/` — never pass functions/components across that boundary (icons pass as `iconName` strings via KPICard's curated map). Dashboard reads use the service-role client. Date ranges flow from URL search params through `getDateWindow`; every report/comparison/chart must use equivalent inclusive/exclusive semantics and explain prior-period baselines correctly. Mock fallbacks (Clarity UX, unconfigured revenue) are intentional — keep them clearly distinguishable from sourced analytics.
+>
+> **Data-integrity practice:** reproduce a suspected mismatch first (page, URL range, metric label, observed vs expected). Trace end-to-end — UI calc, DB query, table grain/conflict key, ingestion mapping, external-source semantics — checking timezone, dimension scopes, duplicate upserts, aggregation grain, partial-sync windows, first-open-vs-installs, bot filtering, and comparison windows before changing code. Reconcile against the designated source (GA4 website `GA4_PROPERTY_ID`; Sahal Wallet Firebase `GA4_APP_PROPERTY_ID=292950442`; Search Console `https://mrhb.network`; Short.io `mrhbnetwork.short.gy` human vs bot; Play `sahal.wallet.app`; App Store `1602366920` Russian storefront; Supabase source tables). Classify a discrepancy as defect / intentional mock / source limitation / definition mismatch, and state the blast radius before a production-impacting change. Make targeted, reversible fixes; prefer migrations; preserve history; never fabricate source values.
+>
+> **Hard constraints (do not break):** Vercel Hobby cron must stay ≤ once/day (`0 0 * * *`) or all deploys are rejected. Never sum de-duplicated GA4 users across days. `play_installs` is a cumulative badge — use the latest snapshot, never SUM. Paginate all `ga_events`/`gsc_pages` reads (1000-row cap). tsconfig has `downlevelIteration` OFF — use `Array.from(...)` over Map/Set, never `for..of`/spread. `first_open` is an install proxy, not verified installs; transaction counts are not revenue. Clarity/Revenue/social-impressions are intentionally sample/Not-connected.
+>
+> **Firebase events:** `E/S` + platform (`A`/`I`/`W`/`E`) prefix; `_T_` tiles, `_F_` footer, `_P_` popup; transactions in `EA_SEND_`/`EI_SEND_` families; `first_open` is an install proxy; `*_SETTINGS_NEW_PASSCODE` is the cleanest new-user signal (returning users never create a passcode). App Performance metrics/tools are config-driven (`app_metric_map`, `tool_usage_config`) and Admin-editable — renaming an event's pattern re-derives its cards.
+>
+> **You operate without a local build or DDL access** (sandbox is HTTP/HTTPS only): edit files, validate with esbuild + a TS2304 scan, deploy via the GitHub API (`github__push_files`, message key `message`), verify the deployed route, and ship SQL as migration files for the user to run. Use temporary read-only debug routes for behind-auth data checks and delete them after.
+>
+> **Operating style:** evidence-led, concise, transparent. Maintain the dashboard as an operational system, not a cosmetic layer. For every nontrivial change leave a short audit trail (observed / changed / why correct / still uncertain) via a descriptive commit or PR. **Ask before** actions that are irreversible, alter source-of-truth data, rotate credentials, or materially change reporting definitions.
