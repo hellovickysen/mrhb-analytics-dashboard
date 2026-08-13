@@ -7,6 +7,7 @@ import DataTable, { type DataTableColumn } from '@/components/tables/DataTable'
 import { formatNumber, formatPercent, formatDuration, deltaFromPct } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
+import { type CsvExportPayload } from '@/lib/utils/csv'
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -396,6 +397,130 @@ const RANGE_LABELS: Record<string, string> = {
   '90d': 'Last 90 Days',
 }
 
+/**
+ * Build the CSV export payload from the SAME `data` object the page renders.
+ *
+ * Two deliberate choices:
+ * - Cells carry RAW numbers (units in the column label) so a manager can sum
+ *   and chart them in Excel; the values are identical to what the cards show.
+ * - `sample` mirrors the page's own "Showing sample data" banner condition, so
+ *   a CSV is flagged exactly when the screen is flagged — the warning travels
+ *   with the file after it leaves the dashboard.
+ */
+function buildTrafficExport(
+  data: TrafficData,
+  rangeLabel: string,
+  startDate: string,
+  endDate: string
+): CsvExportPayload {
+  const isSample = !data.kpisSourced && !data.breakdownSourced
+
+  return {
+    filename: 'mrhb-traffic',
+    pageTitle: 'Traffic & Acquisition',
+    rangeLabel,
+    startDate,
+    endDate,
+    sample: isSample,
+    sections: [
+      {
+        title: 'KPI Summary',
+        note: 'Source: GA4 website property. User metrics are GA4 de-duplicated per-range totals — do not add them across rows or ranges.',
+        columns: [
+          { key: 'metric', label: 'Metric' },
+          { key: 'value', label: 'Value' },
+          { key: 'change', label: 'Change vs previous period (%)' },
+        ],
+        rows: [
+          { metric: 'Sessions', value: data.sessions.value, change: data.sessions.change },
+          { metric: 'Users', value: data.users.value, change: data.users.change },
+          { metric: 'New Users', value: data.newUsers.value, change: data.newUsers.change },
+          { metric: 'Bounce Rate (%)', value: data.bounceRate.value, change: data.bounceRate.change },
+          {
+            metric: 'Avg Session Duration (seconds)',
+            value: data.avgSessionDuration.value,
+            change: data.avgSessionDuration.change,
+          },
+        ],
+      },
+      {
+        title: 'Sessions & Users Trend',
+        columns: [
+          { key: 'date', label: 'Date' },
+          { key: 'sessions', label: 'Sessions' },
+          { key: 'users', label: 'Users' },
+        ],
+        rows: data.sessionsUsersTrend.map((point) => ({
+          date: point.date,
+          sessions: point.value,
+          users: point.secondaryValue,
+        })),
+      },
+      {
+        title: 'Channel Breakdown',
+        columns: [
+          { key: 'channel', label: 'Channel' },
+          { key: 'sessions', label: 'Sessions' },
+        ],
+        rows: data.channelBreakdown.map((point) => ({ channel: point.name, sessions: point.value })),
+      },
+      {
+        title: 'Top Sources / Medium',
+        columns: [
+          { key: 'source', label: 'Source' },
+          { key: 'medium', label: 'Medium' },
+          { key: 'sessions', label: 'Sessions' },
+          { key: 'users', label: 'Users' },
+          { key: 'bounceRate', label: 'Bounce Rate (%)' },
+        ],
+        rows: data.topSources.map((row) => ({
+          source: row.source,
+          medium: row.medium,
+          sessions: row.sessions,
+          users: row.users,
+          bounceRate: row.bounceRate,
+        })),
+      },
+      {
+        title: 'Device Category',
+        note: 'Source: ga_geo (website only). Values are users.',
+        columns: [
+          { key: 'device', label: 'Device' },
+          { key: 'users', label: 'Users' },
+        ],
+        rows: data.deviceBreakdown.map((point) => ({ device: point.name, users: point.value })),
+      },
+      {
+        title: 'Top Countries',
+        note: 'Source: ga_geo (website only). Values are users.',
+        columns: [
+          { key: 'country', label: 'Country' },
+          { key: 'users', label: 'Users' },
+        ],
+        rows: data.topCountries.map((point) => ({ country: point.label, users: point.value })),
+      },
+      {
+        title: 'Browser & OS Breakdown',
+        note: 'Avg Session repeats the page-level average — ga_geo does not carry per-browser duration.',
+        columns: [
+          { key: 'browser', label: 'Browser' },
+          { key: 'os', label: 'OS' },
+          { key: 'sessions', label: 'Sessions' },
+          { key: 'users', label: 'Users' },
+          { key: 'avgSessionDuration', label: 'Avg Session (seconds)' },
+        ],
+        rows: data.browserOsBreakdown.map((row) => ({
+          browser: row.browser,
+          os: row.os,
+          sessions: row.sessions,
+          users: row.users,
+          avgSessionDuration: row.avgSessionDuration,
+        })),
+      },
+    ],
+  }
+}
+
 export default async function TrafficPage({
   searchParams,
 }: {
@@ -403,6 +528,8 @@ export default async function TrafficPage({
 }) {
   const data = await getTrafficData(searchParams)
   const rangeLabel = RANGE_LABELS[searchParams?.range ?? '30d'] ?? 'Last 30 Days'
+  const { startDate, endDate } = getDateWindow(searchParams)
+  const exportPayload = buildTrafficExport(data, rangeLabel, startDate, endDate)
 
   const sourceRows = data.topSources.map((row) => ({
     source: row.source,
@@ -422,7 +549,7 @@ export default async function TrafficPage({
 
   return (
     <div>
-      <Header title="Traffic & Acquisition" />
+      <Header title="Traffic & Acquisition" exportPayload={exportPayload} />
 
       {/* Data-state notices — never present sample data as live */}
       {!data.kpisSourced && !data.breakdownSourced && (

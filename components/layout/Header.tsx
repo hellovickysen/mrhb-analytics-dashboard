@@ -3,11 +3,19 @@
 import { useEffect, useState } from 'react'
 import { useRouter, useSearchParams, usePathname } from 'next/navigation'
 import { RefreshCw } from 'lucide-react'
+import ExportButton from '@/components/export/ExportButton'
+import { type CsvExportPayload } from '@/lib/utils/csv'
 
 export type DateRange = 'today' | 'yesterday' | '7d' | '30d' | '90d'
 
 interface HeaderProps {
   title: string
+  /**
+   * Optional CSV export payload. Pages build this from the same data object
+   * they render (plain serialisable values only), so the download always
+   * matches the screen. Omit it and the export button simply doesn't appear.
+   */
+  exportPayload?: CsvExportPayload
 }
 
 const RANGE_OPTIONS: { label: string; value: DateRange }[] = [
@@ -36,7 +44,7 @@ function writeRangeCookie(range: DateRange): void {
   document.cookie = `${RANGE_COOKIE}=${range}; path=/; SameSite=Lax`
 }
 
-export default function Header({ title }: HeaderProps) {
+export default function Header({ title, exportPayload }: HeaderProps) {
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
@@ -108,6 +116,11 @@ export default function Header({ title }: HeaderProps) {
             </button>
           ))}
         </div>
+
+        {/* CSV export — only rendered when the page supplies a payload */}
+        {exportPayload && (
+          <ExportButton payload={exportPayload} rangeKey={activeRange} compact />
+        )}
 
         {/* Refresh button */}
         <button
