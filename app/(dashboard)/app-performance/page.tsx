@@ -7,6 +7,7 @@ import { formatNumber, formatPercent, deltaFromPct } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 import { fetchGA4AppActiveUsersTotal } from '@/lib/api-clients/ga4-app-active-total'
+import { fetchGA4AppOnboardingFunnel } from '@/lib/api-clients/ga4-app-funnel'
 import { fetchRecentPlayReviews, type PlayReviewItem } from '@/lib/api-clients/play-reviews'
 import { computeToolTabs, toolForEventName, DEFAULT_TOOL_MAPPINGS, type ToolMapping, type ToolTab } from '@/lib/config/tool-usage'
 import ToolUsageTabs from '@/components/app-performance/ToolUsageTabs'
@@ -78,6 +79,7 @@ interface AppPerformanceData {
   transactionRate: KPIMetric
   usageTrend: AreaChartDataPoint[]
   onboardingFunnel: FunnelStep[]
+  onboardingFunnelSourced: boolean
   ratingDistribution: RatingBucket[]
   starBreakdownAvailable: boolean
   starBreakdownFromSample: boolean
@@ -94,6 +96,14 @@ function formatTrendDate(dateStr: string): string {
   const d = new Date(`${dateStr}T00:00:00Z`)
   if (Number.isNaN(d.getTime())) return dateStr
   return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit', timeZone: 'UTC' })
+}
+
+/** Previous calendar day (YYYY-MM-DD) — used to make the GA4 prev-period end
+ * date exclusive of the current period's first day (GA4 end dates are
+ * inclusive, so passing `since` directly overlaps one day). */
+function dayBefore(dateStr: string): string {
+  const t = new Date(`${dateStr}T00:00:00Z`).getTime()
+  return new Date(t - 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
 }
 
 /** Percent change of current vs previous. Returns null when there's no usable
@@ -150,6 +160,7 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
     transactionRate: { value: 0, change: null },
     usageTrend: [],
     onboardingFunnel: [],
+    onboardingFunnelSourced: false,
     ratingDistribution: [],
     starBreakdownAvailable: false,
     starBreakdownFromSample: false,
@@ -163,7 +174,7 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
   }
 
   try {
-    const [events, prevEvents, installsRes, ratingsRes, activeCur, activePrev, reviews] = await Promise.all([
+    const [events, prevEvents, installsRes, ratingsRes, activeCur, activePrev, reviews, ga4Funnel] = await Promise.all([
       fetchEvents(supabase, since, { lte: until }),
       fetchEvents(supabase, prevStartDate, { lt: since }),
       supabase.from('play_installs').select('date, installs, country').order('date', { ascending: false }).limit(180),
@@ -173,8 +184,9 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
         .order('date', { ascending: false })
         .limit(5),
       fetchGA4AppActiveUsersTotal(since, until),
-      fetchGA4AppActiveUsersTotal(prevStartDate, since),
+      fetchGA4AppActiveUsersTotal(prevStartDate, dayBefore(since)),
       fetchRecentPlayReviews(2),
+      fetchGA4AppOnboardingFunnel(since, until),
     ])
 
     const hasEvents = events.length > 0
@@ -271,21 +283,30 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([date, e]) => ({ date: formatTrendDate(date), value: e.installs, secondaryValue: e.active }))
 
-    // ---- New-user onboarding DROP-OFF (new-user-only events → a real funnel).
+    // ---- New-user onboarding DROP-OFF — Android & iOS only.
     // Every new-user path (Let's Go / Social Signup / Import Wallet) enters the
     // signup flow and converges on creating a 6-digit passcode
     // (SETTINGS_NEW_PASSCODE) — returning users never create one — then finishes
-    // at ONBOARDING_GUIDE_COMPLETE. Counts are users summed daily (a ceiling),
-    // computed identically per stage so the stage-to-stage ratios are meaningful. ----
+    // at ONBOARDING_GUIDE_COMPLETE.
+    //
+    // CORRECT SOURCE: GA4 directly (fetchGA4AppOnboardingFunnel), which returns,
+    // per stage, the SUM of each day's DISTINCT users across that stage's events
+    // — so a user who triggers Let's Go AND Import Wallet on the same day counts
+    // once that day, not twice. `ga_events` cannot express that union (it has no
+    // user id and stores date+event_name grain only), so summing its per-event
+    // `users` rows double-counts; we fall back to it only if GA4 is unavailable,
+    // and flag the funnel as unsourced so the copy/caveat make that explicit. ----
     const pSignupStarted = (n: string) =>
       n.includes('ONBOARDING_LETS_GO') || n.includes('ONBOARDING_SOCIAL_SIGNUP') || n.includes('ONBOARDING_IMPORT_WALLET')
     const pPasscodeCreated = (n: string) => n.includes('SETTINGS_NEW_PASSCODE')
-    const signupStartedUsers = usr(events, pSignupStarted)
-    const passcodeCreatedUsers = usr(events, pPasscodeCreated)
+    const funnelSignupStarted = ga4Funnel ? ga4Funnel.signupStarted : usr(events, pSignupStarted)
+    const funnelPasscodeCreated = ga4Funnel ? ga4Funnel.passcodeCreated : usr(events, pPasscodeCreated)
+    const funnelOnboardingComplete = ga4Funnel ? ga4Funnel.onboardingComplete : completeUsers
+    const onboardingFunnelSourced = !!ga4Funnel
     const onboardingFunnel: FunnelStep[] = [
-      { label: 'Started signup', value: signupStartedUsers },
-      { label: 'Passcode created', value: passcodeCreatedUsers },
-      { label: 'Onboarding complete', value: completeUsers },
+      { label: 'New user signup', value: funnelSignupStarted },
+      { label: 'Passcode created', value: funnelPasscodeCreated },
+      { label: 'Onboarding complete', value: funnelOnboardingComplete },
     ]
 
     // ---- Rating distribution (star breakdown often unavailable → all zeros) ----
@@ -393,6 +414,7 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
       transactionRate,
       usageTrend,
       onboardingFunnel,
+      onboardingFunnelSourced,
       ratingDistribution,
       starBreakdownAvailable,
       starBreakdownFromSample,
@@ -474,6 +496,7 @@ export default async function AppPerformancePage({
   if (data.ratingsSourced && !data.starBreakdownAvailable) notLive.push('Rating star breakdown is not provided by the Play Store listing (shows blanks).')
   notLive.push('App Store is not connected (needs App Store Connect / the Russian storefront) — its card shows “Not connected”.')
   if (!data.activeUsersSourced) notLive.push('Active Users falls back to session users (the GA4 app active-users metric is unavailable).')
+  if (data.hasEvents && !data.onboardingFunnelSourced) notLive.push('The onboarding funnel fell back to summed ga_events user rows (GA4 was unavailable), which can double-count a user across signup paths on the same day.')
 
   return (
     <div>
@@ -576,7 +599,7 @@ export default async function AppPerformancePage({
       <div className="mb-6 overflow-hidden rounded-2xl bg-mrhb-white shadow-sm ring-1 ring-mrhb-warm-grey/10">
         <div className="flex flex-col gap-1 border-b border-mrhb-warm-grey/10 bg-gradient-to-r from-mrhb-blue/5 to-transparent px-6 py-5">
           <h2 className="text-lg font-semibold text-mrhb-dark">New User Onboarding — Drop-off</h2>
-          <p className="text-xs text-mrhb-dark/50">{rangeLabel} · new-user signup flow only · % of starters</p>
+          <p className="text-xs text-mrhb-dark/50">{rangeLabel} · Android &amp; iOS · new-user signup flow · % of starters</p>
         </div>
 
         <div className="px-4 py-8 sm:px-6">
@@ -635,7 +658,7 @@ export default async function AppPerformancePage({
           {funnelStarted > 0 && (
             <div className="mx-auto mt-5 flex max-w-xl flex-wrap items-center justify-center gap-2 text-xs">
               <span className="rounded-full bg-mrhb-blue-light px-2.5 py-1 font-medium text-mrhb-blue">
-                Started → Passcode: {convPct(funnelPasscode, funnelStarted)}%
+                Signup → Passcode: {convPct(funnelPasscode, funnelStarted)}%
               </span>
               <span className="rounded-full bg-mrhb-blue-light px-2.5 py-1 font-medium text-mrhb-blue">
                 Passcode → Complete: {convPct(funnelComplete, funnelPasscode)}%
@@ -647,12 +670,15 @@ export default async function AppPerformancePage({
           )}
 
           <p className="mx-auto mt-4 max-w-xl text-xs text-mrhb-dark/50">
-            New-user signup flow only: &ldquo;Started&rdquo; = users who began any path (Let&apos;s Go, Social Signup or
-            Import Wallet); &ldquo;Passcode created&rdquo; = the create-6-digit-passcode step (*_SETTINGS_NEW_PASSCODE)
-            that every new user hits and returning users never do; &ldquo;Onboarding complete&rdquo; =
-            *_ONBOARDING_GUIDE_COMPLETE. Users are summed daily (a ceiling), matched across Android/iOS/web. These are
-            GA4 signals and undercount your backend&apos;s registered-signup total, so read them as drop-off ratios, not
-            the authoritative signup count.
+            Android &amp; iOS only. Each stage is the sum of daily unique users: for every day we count the
+            distinct users who triggered that stage&rsquo;s events, then add those daily counts across the range.
+            &ldquo;New user signup&rdquo; = users who began any path (Let&apos;s Go, Social Signup or Import Wallet),
+            de-duplicated within each day across all paths; &ldquo;Passcode created&rdquo; = the create-6-digit-passcode
+            step (*_SETTINGS_NEW_PASSCODE) that every new user hits and returning users never do; &ldquo;Onboarding
+            complete&rdquo; = *_ONBOARDING_GUIDE_COMPLETE. Because a person who signs up on two days counts on each day,
+            this daily-summed total is a ceiling and can exceed GA4&rsquo;s period-wide unique-user count — it is not
+            the number of distinct people over the whole period. These are GA4 signals and undercount your
+            backend&apos;s registered-signup total, so read them as drop-off ratios, not the authoritative signup count.
           </p>
         </div>
       </div>
