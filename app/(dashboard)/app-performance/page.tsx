@@ -290,12 +290,14 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
     // at ONBOARDING_GUIDE_COMPLETE.
     //
     // CORRECT SOURCE: GA4 directly (fetchGA4AppOnboardingFunnel), which returns,
-    // per stage, the SUM of each day's DISTINCT users across that stage's events
-    // — so a user who triggers Let's Go AND Import Wallet on the same day counts
-    // once that day, not twice. `ga_events` cannot express that union (it has no
-    // user id and stores date+event_name grain only), so summing its per-event
-    // `users` rows double-counts; we fall back to it only if GA4 is unavailable,
-    // and flag the funnel as unsourced so the copy/caveat make that explicit. ----
+    // per stage, the PERIOD-WIDE UNIQUE users — the distinct users who fired any
+    // of that stage's events across the whole range, counted once for the period.
+    // This matches a GA4 Explore "Total" (Active users by Event name, no Date
+    // dimension), so a manager cross-checking in GA4 sees the same number.
+    // `ga_events` cannot express that union (no user id; date+event_name grain
+    // only), so summing its per-event `users` rows double-counts; we fall back to
+    // it only if GA4 is unavailable, and flag the funnel as unsourced so the
+    // copy/caveat make that explicit. ----
     const pSignupStarted = (n: string) =>
       n.includes('ONBOARDING_LETS_GO') || n.includes('ONBOARDING_SOCIAL_SIGNUP') || n.includes('ONBOARDING_IMPORT_WALLET')
     const pPasscodeCreated = (n: string) => n.includes('SETTINGS_NEW_PASSCODE')
@@ -496,7 +498,7 @@ export default async function AppPerformancePage({
   if (data.ratingsSourced && !data.starBreakdownAvailable) notLive.push('Rating star breakdown is not provided by the Play Store listing (shows blanks).')
   notLive.push('App Store is not connected (needs App Store Connect / the Russian storefront) — its card shows “Not connected”.')
   if (!data.activeUsersSourced) notLive.push('Active Users falls back to session users (the GA4 app active-users metric is unavailable).')
-  if (data.hasEvents && !data.onboardingFunnelSourced) notLive.push('The onboarding funnel fell back to summed ga_events user rows (GA4 was unavailable), which can double-count a user across signup paths on the same day.')
+  if (data.hasEvents && !data.onboardingFunnelSourced) notLive.push('The onboarding funnel fell back to summed ga_events user rows (GA4 was unavailable), which can double-count a user across signup paths and is not the period-wide unique count.')
 
   return (
     <div>
@@ -670,14 +672,14 @@ export default async function AppPerformancePage({
           )}
 
           <p className="mx-auto mt-4 max-w-xl text-xs text-mrhb-dark/50">
-            Android &amp; iOS only. Each stage is the sum of daily unique users: for every day we count the
-            distinct users who triggered that stage&rsquo;s events, then add those daily counts across the range.
-            &ldquo;New user signup&rdquo; = users who began any path (Let&apos;s Go, Social Signup or Import Wallet),
-            de-duplicated within each day across all paths; &ldquo;Passcode created&rdquo; = the create-6-digit-passcode
-            step (*_SETTINGS_NEW_PASSCODE) that every new user hits and returning users never do; &ldquo;Onboarding
-            complete&rdquo; = *_ONBOARDING_GUIDE_COMPLETE. Because a person who signs up on two days counts on each day,
-            this daily-summed total is a ceiling and can exceed GA4&rsquo;s period-wide unique-user count — it is not
-            the number of distinct people over the whole period. These are GA4 signals and undercount your
+            Android &amp; iOS only. Each stage is the period-wide unique-user count: the distinct users who triggered
+            that stage&rsquo;s events at least once across the range, counted once for the whole period — the same number
+            GA4 shows in the &ldquo;Total&rdquo; row of an Active-users-by-Event-name report.
+            &ldquo;New user signup&rdquo; = users who began any path (Let&apos;s Go, Social Signup or Import Wallet);
+            &ldquo;Passcode created&rdquo; = the create-6-digit-passcode step (*_SETTINGS_NEW_PASSCODE) that every new
+            user hits and returning users never do; &ldquo;Onboarding complete&rdquo; = *_ONBOARDING_GUIDE_COMPLETE
+            (fires on dashboard arrival). To cross-check in GA4, filter Event name to a stage&rsquo;s events with
+            Platform = Android/iOS and read the Active-users Total. These are GA4 signals and undercount your
             backend&apos;s registered-signup total, so read them as drop-off ratios, not the authoritative signup count.
           </p>
         </div>

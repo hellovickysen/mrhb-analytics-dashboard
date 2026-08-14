@@ -1,38 +1,35 @@
 /**
  * New-user onboarding funnel counts for the Sahal Wallet Firebase GA4 app
- * property (GA4_APP_PROPERTY_ID), computed the CORRECT way: per-day
- * de-duplicated users, summed across the range — Android & iOS only.
+ * property (GA4_APP_PROPERTY_ID) — Android & iOS only.
  *
- * WHY THIS EXISTS
- * The App Performance funnel previously derived "Started signup" by SUMMING
- * the per-event `ga_events.users` rows for every qualifying signup event
- * (Let's Go + each Social Signup provider + Import Wallet). Because a single
- * user can trigger more than one of those events on the same day, that sum
- * double-counts people: 20 Let's Go + 5 Google + 3 Twitter + 4 Import Wallet
- * became 32 even when only 23 distinct users signed up that day.
+ * DEFINITION: PERIOD-WIDE UNIQUE users per stage. Each stage value is the
+ * de-duplicated count of distinct users who fired ANY of that stage's events
+ * over the whole [startDate, endDate] window — i.e. one person is counted once
+ * for the period, no matter how many days or how many qualifying events they
+ * triggered. This matches what a GA4 Explore report shows in its "Total" row
+ * when Active users is the metric and Event name is the row dimension (no Date
+ * dimension), so a manager cross-checking in GA4 gets the same number.
  *
- * `ga_events` is stored at (date, event_name) grain with NO user identifier,
- * so the union of users across those event names cannot be recovered from it.
- * The only correct source is GA4 itself, queried with:
- *   - dimension: `date` ONLY (no eventName breakdown — that is what forces GA4
- *     to de-duplicate a user across every matching event within the day),
- *   - metric: `activeUsers` (GA4's de-duplicated user metric),
- *   - a dimensionFilter restricting `eventName` to the OR-union of the stage's
- *     qualifying events, Android/iOS only.
- * Each day's `activeUsers` is then the distinct users who fired ANY qualifying
- * event that day; the funnel value is the SUM of those daily distinct counts.
+ * HOW: GA4's `activeUsers` is a de-duplicated, NON-additive metric. Running a
+ * report with NO date dimension (just the metric + an eventName filter) returns
+ * a single correctly de-duplicated period total — the same approach used by
+ * fetchGA4AppActiveUsersTotal for the Active Users KPI. (Do NOT add a date
+ * dimension and sum the days — that would produce a daily-summed CEILING that
+ * over-counts anyone active on multiple days.)
  *
- * This is intentionally a daily-summed CEILING, not a period-wide unique count:
- * a person who signs up on two different days counts on each day, by design.
- * That is why a daily-summed total (e.g. 330) can legitimately exceed GA4's
- * period-wide unique total (e.g. 195).
+ * WHY NOT ga_events: the stored ga_events table is at (date, event_name) grain
+ * with NO user identifier, so the union of distinct users across Let's Go /
+ * Social Signup / Import Wallet cannot be recovered from it — summing its
+ * per-event `users` rows double-counts a person who triggered more than one
+ * path. GA4 must be queried directly.
  *
  * PLATFORM SCOPE — Android & iOS only. Event names encode platform+type in a
  * 3-char prefix: first char E (event/action) or S (screen), second char A
- * (Android) or I (iOS), then `_`. The regex gate `^[ES][AI]_` therefore keeps
- * Android + iOS (action and screen forms) and excludes web (EW_/SW_) and
- * extension (EE_/SE_). GA4's user de-duplication means matching both the
- * action and screen form of the same step never double-counts a user.
+ * (Android) or I (iOS), then `_`. The regex gate `^[ES][AI]_` keeps Android +
+ * iOS (action and screen forms — the passcode step is a native SA_/SI_ screen)
+ * and excludes web (EW_/SW_) and extension (EE_/SE_). GA4's user
+ * de-duplication means matching both the action and screen form of the same
+ * step never double-counts a user.
  *
  * Server-only module — never import from a 'use client' component. Returns
  * `null` on missing auth / API failure so callers can fall back gracefully.
@@ -42,11 +39,11 @@ import { google, type analyticsdata_v1beta } from 'googleapis'
 import { getGoogleAuth } from './google-auth'
 
 export interface AppOnboardingFunnel {
-  /** Sum of daily distinct users who started a new-user signup path. */
+  /** Period-wide distinct users who started a new-user signup path. */
   signupStarted: number
-  /** Sum of daily distinct users who created a new passcode. */
+  /** Period-wide distinct users who created a new passcode. */
   passcodeCreated: number
-  /** Sum of daily distinct users who completed onboarding. */
+  /** Period-wide distinct users who completed onboarding. */
   onboardingComplete: number
 }
 
@@ -68,11 +65,11 @@ function toNum(value: string | undefined | null): number {
 }
 
 /**
- * Runs a single GA4 report (date dimension, activeUsers metric, eventName
- * regex filter) and returns the SUM of the daily de-duplicated user counts.
- * At most ~90 rows for a 90-day window, so a single request suffices.
+ * Runs a GA4 report with NO date dimension (activeUsers metric + an eventName
+ * regex filter) and returns the single de-duplicated period-wide unique-user
+ * total for the events matching the filter.
  */
-async function sumDailyActiveUsers(
+async function periodUniqueActiveUsers(
   client: analyticsdata_v1beta.Analyticsdata,
   property: string,
   startDate: string,
@@ -83,7 +80,6 @@ async function sumDailyActiveUsers(
     property,
     requestBody: {
       dateRanges: [{ startDate, endDate }],
-      dimensions: [{ name: 'date' }],
       metrics: [{ name: 'activeUsers' }],
       dimensionFilter: {
         filter: {
@@ -95,17 +91,16 @@ async function sumDailyActiveUsers(
           },
         },
       },
-      limit: '100000',
     },
   })
-  const rows = resp.data.rows ?? []
-  return rows.reduce((sum, row) => sum + toNum(row.metricValues?.[0]?.value), 0)
+  return toNum(resp.data.rows?.[0]?.metricValues?.[0]?.value)
 }
 
 /**
- * Returns the Android/iOS onboarding funnel over the inclusive
- * [startDate, endDate] GA4 window, or `null` if auth/property is missing or
- * any report fails (so the caller can fall back to its existing figures).
+ * Returns the Android/iOS onboarding funnel (period-wide unique users per
+ * stage) over the inclusive [startDate, endDate] GA4 window, or `null` if
+ * auth/property is missing or any report fails (so the caller can fall back
+ * to its existing figures).
  */
 export async function fetchGA4AppOnboardingFunnel(
   startDate: string,
@@ -122,9 +117,9 @@ export async function fetchGA4AppOnboardingFunnel(
     const property = `properties/${propertyId}`
 
     const [signupStarted, passcodeCreated, onboardingComplete] = await Promise.all([
-      sumDailyActiveUsers(client, property, startDate, endDate, SIGNUP_STARTED_REGEX),
-      sumDailyActiveUsers(client, property, startDate, endDate, PASSCODE_CREATED_REGEX),
-      sumDailyActiveUsers(client, property, startDate, endDate, ONBOARDING_COMPLETE_REGEX),
+      periodUniqueActiveUsers(client, property, startDate, endDate, SIGNUP_STARTED_REGEX),
+      periodUniqueActiveUsers(client, property, startDate, endDate, PASSCODE_CREATED_REGEX),
+      periodUniqueActiveUsers(client, property, startDate, endDate, ONBOARDING_COMPLETE_REGEX),
     ])
 
     return { signupStarted, passcodeCreated, onboardingComplete }
