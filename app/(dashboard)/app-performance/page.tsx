@@ -7,7 +7,7 @@ import { formatNumber, formatPercent, deltaFromPct } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 import { fetchGA4AppActiveUsersTotal } from '@/lib/api-clients/ga4-app-active-total'
-import { fetchGA4AppOnboardingFunnel, fetchGA4AppRateInputs } from '@/lib/api-clients/ga4-app-funnel'
+import { fetchGA4AppOnboardingFunnel, fetchGA4AppRateInputs, fetchGA4AppTransactionsByType, APP_TRANSACTION_TYPES } from '@/lib/api-clients/ga4-app-funnel'
 import { fetchRecentPlayReviews, type PlayReviewItem } from '@/lib/api-clients/play-reviews'
 import { computeToolTabs, toolForEventName, DEFAULT_TOOL_MAPPINGS, type ToolMapping, type ToolTab } from '@/lib/config/tool-usage'
 import ToolUsageTabs from '@/components/app-performance/ToolUsageTabs'
@@ -78,6 +78,9 @@ interface AppPerformanceData {
   onboardingRate: KPIMetric
   transactionRate: KPIMetric
   ratesSourced: boolean
+  transactingUsers: number
+  transactionsByType: { label: string; users: number }[]
+  transactionTypesPending: string[]
   usageTrend: AreaChartDataPoint[]
   onboardingFunnel: FunnelStep[]
   onboardingFunnelSourced: boolean
@@ -160,6 +163,9 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
     onboardingRate: { value: 0, change: null },
     transactionRate: { value: 0, change: null },
     ratesSourced: false,
+    transactingUsers: 0,
+    transactionsByType: [],
+    transactionTypesPending: [],
     usageTrend: [],
     onboardingFunnel: [],
     onboardingFunnelSourced: false,
@@ -176,7 +182,7 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
   }
 
   try {
-    const [events, prevEvents, installsRes, ratingsRes, activeCur, activePrev, reviews, ga4Funnel, rateInputsCur, rateInputsPrev] = await Promise.all([
+    const [events, prevEvents, installsRes, ratingsRes, activeCur, activePrev, reviews, ga4Funnel, rateInputsCur, rateInputsPrev, txByType] = await Promise.all([
       fetchEvents(supabase, since, { lte: until }),
       fetchEvents(supabase, prevStartDate, { lt: since }),
       supabase.from('play_installs').select('date, installs, country').order('date', { ascending: false }).limit(180),
@@ -191,6 +197,7 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
       fetchGA4AppOnboardingFunnel(since, until),
       fetchGA4AppRateInputs(since, until),
       fetchGA4AppRateInputs(prevStartDate, dayBefore(since)),
+      fetchGA4AppTransactionsByType(since, until),
     ])
 
     const hasEvents = events.length > 0
@@ -287,6 +294,15 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
     const txCur = txDenCur > 0 ? (txNumCur / txDenCur) * 100 : 0
     const txPrev = txDenPrev > 0 ? (txNumPrev / txDenPrev) * 100 : 0
     const transactionRate: KPIMetric = { value: txCur, change: pctChange(txCur, txPrev) }
+
+    // ---- Transacting users (union total) + per-type breakdown (completed
+    // transactions, GA4 period-wide unique, Android/iOS). The union total is a
+    // de-dup across types, so it is <= the sum of the per-type counts. Inactive
+    // types (MIRO/eSIM/Coinformance) are listed as pending until the dev emits
+    // their SEND events. ----
+    const transactingUsers = txNumCur
+    const transactionsByType = (txByType ?? []).map((t) => ({ label: t.label, users: t.users }))
+    const transactionTypesPending = APP_TRANSACTION_TYPES.filter((t) => !t.active).map((t) => t.label)
 
     // ---- Trend: daily new installs (first_open) vs daily active users (session_start users) ----
     const byDate = new Map<string, { installs: number; active: number }>()
@@ -436,6 +452,9 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
       onboardingRate,
       transactionRate,
       ratesSourced,
+      transactingUsers,
+      transactionsByType,
+      transactionTypesPending,
       usageTrend,
       onboardingFunnel,
       onboardingFunnelSourced,
@@ -587,7 +606,7 @@ export default async function AppPerformancePage({
           changeValue={deltaFromPct(data.transactionRate.value, data.transactionRate.change)}
           trend={getTrend(data.transactionRate.change)}
           iconName="dollar-sign"
-          tooltip="Transacting users ÷ users reaching the dashboard, as GA4 period-wide unique users (Android/iOS): send / swap / ramp events. Cross-checks against a GA4 Explore Total (a behavioural rate, not revenue)."
+          tooltip="Transacting users ÷ users reaching the dashboard, as GA4 period-wide unique users (Android/iOS). Transacting = completed a transaction (E[AI]_SEND_*) in Swap, Sahal Stake, MRHB Store or Emplifai. MIRO / eSIM / Coinformance are pending their SEND events. A behavioural rate, not revenue."
         />
       </div>
 
@@ -704,6 +723,45 @@ export default async function AppPerformancePage({
             (fires on dashboard arrival). To cross-check in GA4, filter Event name to a stage&rsquo;s events with
             Platform = Android/iOS and read the Active-users Total. These are GA4 signals and undercount your
             backend&apos;s registered-signup total, so read them as drop-off ratios, not the authoritative signup count.
+          </p>
+        </div>
+      </div>
+
+      {/* Transactions by type — completed transactions (GA4 period-wide unique) */}
+      <div className="mb-6 overflow-hidden rounded-2xl bg-mrhb-white shadow-sm ring-1 ring-mrhb-warm-grey/10">
+        <div className="flex flex-col gap-1 border-b border-mrhb-warm-grey/10 bg-gradient-to-r from-mrhb-blue/5 to-transparent px-6 py-5">
+          <h2 className="text-lg font-semibold text-mrhb-dark">Transactions by Type</h2>
+          <p className="text-xs text-mrhb-dark/50">
+            {rangeLabel} · Android &amp; iOS · completed transactions (GA4 period-wide unique) ·{' '}
+            {formatNumber(data.transactingUsers)} unique transacting users
+          </p>
+        </div>
+        <div className="px-4 py-6 sm:px-6">
+          {data.transactionsByType.length === 0 ? (
+            <p className="py-6 text-center text-sm text-mrhb-dark/50">No completed transactions in this period.</p>
+          ) : (
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              {data.transactionsByType.map((t) => {
+                const share = data.transactingUsers > 0 ? (t.users / data.transactingUsers) * 100 : 0
+                return (
+                  <div key={t.label} className="rounded-xl bg-mrhb-cream/40 p-4 ring-1 ring-mrhb-warm-grey/10">
+                    <p className="text-sm font-medium text-mrhb-dark/60">{t.label}</p>
+                    <p className="mt-1 text-2xl font-semibold text-mrhb-dark">{formatNumber(t.users)}</p>
+                    <p className="mt-0.5 text-xs text-mrhb-dark/45">{share.toFixed(share >= 10 ? 0 : 1)}% of transactors</p>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {data.transactionTypesPending.length > 0 && (
+            <p className="mt-4 text-xs text-mrhb-dark/50">
+              Coming soon (pending dev SEND events): {data.transactionTypesPending.join(', ')}.
+            </p>
+          )}
+          <p className="mt-2 text-xs text-mrhb-dark/45">
+            Each tile counts users who completed a transaction (E[AI]_SEND_&hellip;) in that tool, de-duplicated per
+            period. The headline &ldquo;unique transacting users&rdquo; de-duplicates across tools, so it is smaller
+            than the sum of the tiles.
           </p>
         </div>
       </div>

@@ -60,8 +60,43 @@ const SIGNUP_STARTED_REGEX =
 const PASSCODE_CREATED_REGEX = '^[ES][AI]_.*SETTINGS_NEW_PASSCODE'
 const ONBOARDING_COMPLETE_REGEX = '^[ES][AI]_.*ONBOARDING_GUIDE_COMPLETE'
 const APP_DASHBOARD_REGEX = '^[ES][AI]_.*APP_DASHBOARD'
-// Mirrors the default `transaction` app-metric patterns (send / swap / ramp).
-const TRANSACTION_REGEX = '^[ES][AI]_.*(SEND_MONEY|_SEND_|SWAP|SAHAL_RAMP)'
+
+/**
+ * Transaction taxonomy (per the dev's schema: a completed transaction is
+ * `E{A,I}_SEND_{TYPE}_{protocol}`). `token` is the exact TYPE segment right
+ * after `SEND_`; we prefix-match `^E[AI]_SEND_{token}` so it stays Android/iOS
+ * and counts completions only (not screen/footer taps).
+ *
+ * Flip `active` to true to switch a type on — that automatically expands BOTH
+ * the Transaction Rate numerator (union of active tokens) AND the per-type
+ * breakdown. The 3 inactive rows are waiting on the dev to emit their SEND
+ * events (MIRO stake/topup/vote, eSIM, Coinformance).
+ */
+export interface AppTxType {
+  key: string
+  label: string
+  token: string
+  active: boolean
+}
+export const APP_TRANSACTION_TYPES: AppTxType[] = [
+  { key: 'swap', label: 'Swap', token: 'SWAP', active: true },
+  { key: 'sahal_stake', label: 'Sahal Stake', token: 'SAHAL_STAKE', active: true },
+  { key: 'mrhb_store', label: 'MRHB Store', token: 'MRHB_STORE', active: true },
+  { key: 'emplifai', label: 'Emplifai', token: 'EMPLIFAI', active: true },
+  { key: 'miro_stake', label: 'MIRO Stake', token: 'MIRO_STAKE', active: false },
+  { key: 'miro_topup', label: 'MIRO Topup', token: 'MIRO_TOPUP', active: false },
+  { key: 'miro_vote', label: 'MIRO Vote', token: 'MIRO_VOTE', active: false },
+  { key: 'esim', label: 'eSIM', token: 'ESIM', active: false },
+  { key: 'coinformance', label: 'Coinformance', token: 'COINFORMANCE', active: false },
+]
+function activeTxTypes(): AppTxType[] {
+  return APP_TRANSACTION_TYPES.filter((t) => t.active)
+}
+function txTypeRegex(token: string): string {
+  return '^E[AI]_SEND_' + token
+}
+// Union of active transaction tokens → the Transaction Rate numerator.
+const TRANSACTION_REGEX = '^E[AI]_SEND_(' + activeTxTypes().map((t) => t.token).join('|') + ')'
 
 function toNum(value: string | undefined | null): number {
   if (value === undefined || value === null || value === '') return 0
@@ -165,6 +200,39 @@ export async function fetchGA4AppRateInputs(
     return { signupStarted, complete, dashboard, tx }
   } catch (error) {
     console.error('[ga4-app-funnel] fetchGA4AppRateInputs failed:', error)
+    return null
+  }
+}
+
+/** Period-wide unique transacting users for one transaction type. */
+export interface AppTxTypeCount {
+  key: string
+  label: string
+  users: number
+}
+
+/**
+ * Returns period-wide unique transacting users (Android/iOS) per ACTIVE
+ * transaction type — the "Transactions by type" breakdown. `null` on failure.
+ * The de-duplicated union across types is the Transaction Rate numerator
+ * (fetchGA4AppRateInputs.tx), which is <= the sum of these per-type counts.
+ */
+export async function fetchGA4AppTransactionsByType(
+  startDate: string,
+  endDate: string
+): Promise<AppTxTypeCount[] | null> {
+  try {
+    const app = getAppClient()
+    if (!app) return null
+    const { client, property } = app
+
+    const types = activeTxTypes()
+    const counts = await Promise.all(
+      types.map((t) => periodUniqueActiveUsers(client, property, startDate, endDate, txTypeRegex(t.token)))
+    )
+    return types.map((t, i) => ({ key: t.key, label: t.label, users: counts[i] }))
+  } catch (error) {
+    console.error('[ga4-app-funnel] fetchGA4AppTransactionsByType failed:', error)
     return null
   }
 }
