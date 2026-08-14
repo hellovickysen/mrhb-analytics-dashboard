@@ -7,7 +7,7 @@ import { formatNumber, formatPercent, deltaFromPct } from '@/lib/utils/format'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getDateWindow } from '@/lib/utils/date-range'
 import { fetchGA4AppActiveUsersTotal } from '@/lib/api-clients/ga4-app-active-total'
-import { fetchGA4AppOnboardingFunnel } from '@/lib/api-clients/ga4-app-funnel'
+import { fetchGA4AppOnboardingFunnel, fetchGA4AppRateInputs } from '@/lib/api-clients/ga4-app-funnel'
 import { fetchRecentPlayReviews, type PlayReviewItem } from '@/lib/api-clients/play-reviews'
 import { computeToolTabs, toolForEventName, DEFAULT_TOOL_MAPPINGS, type ToolMapping, type ToolTab } from '@/lib/config/tool-usage'
 import ToolUsageTabs from '@/components/app-performance/ToolUsageTabs'
@@ -77,6 +77,7 @@ interface AppPerformanceData {
   ratingsSourced: boolean
   onboardingRate: KPIMetric
   transactionRate: KPIMetric
+  ratesSourced: boolean
   usageTrend: AreaChartDataPoint[]
   onboardingFunnel: FunnelStep[]
   onboardingFunnelSourced: boolean
@@ -158,6 +159,7 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
     ratingsSourced: false,
     onboardingRate: { value: 0, change: null },
     transactionRate: { value: 0, change: null },
+    ratesSourced: false,
     usageTrend: [],
     onboardingFunnel: [],
     onboardingFunnelSourced: false,
@@ -174,7 +176,7 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
   }
 
   try {
-    const [events, prevEvents, installsRes, ratingsRes, activeCur, activePrev, reviews, ga4Funnel] = await Promise.all([
+    const [events, prevEvents, installsRes, ratingsRes, activeCur, activePrev, reviews, ga4Funnel, rateInputsCur, rateInputsPrev] = await Promise.all([
       fetchEvents(supabase, since, { lte: until }),
       fetchEvents(supabase, prevStartDate, { lt: since }),
       supabase.from('play_installs').select('date, installs, country').order('date', { ascending: false }).limit(180),
@@ -187,6 +189,8 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
       fetchGA4AppActiveUsersTotal(prevStartDate, dayBefore(since)),
       fetchRecentPlayReviews(2),
       fetchGA4AppOnboardingFunnel(since, until),
+      fetchGA4AppRateInputs(since, until),
+      fetchGA4AppRateInputs(prevStartDate, dayBefore(since)),
     ])
 
     const hasEvents = events.length > 0
@@ -257,14 +261,28 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
         }
       : { value: 0, change: null }
 
-    // ---- Onboarding Rate = onboarding-complete users / new installs (approx) ----
-    const onbCur = firstOpen > 0 ? (completeUsers / firstOpen) * 100 : 0
-    const onbPrev = prevFirstOpen > 0 ? (prevCompleteUsers / prevFirstOpen) * 100 : 0
+    // ---- Onboarding Rate = onboarding-complete users / new installs.
+    // Uses GA4 PERIOD-WIDE UNIQUE users (Android/iOS) — the same de-dup method as
+    // the funnel — so it reconciles with GA4 and no longer over-counts by summing
+    // ga_events `users` across days/events. Falls back to the ga_events sums only
+    // if GA4 is unavailable (flagged in the banner). ----
+    const ratesSourced = !!rateInputsCur
+    const onbNumCur = rateInputsCur ? rateInputsCur.complete : completeUsers
+    const onbDenCur = rateInputsCur ? rateInputsCur.firstOpen : firstOpen
+    const onbNumPrev = rateInputsPrev ? rateInputsPrev.complete : prevCompleteUsers
+    const onbDenPrev = rateInputsPrev ? rateInputsPrev.firstOpen : prevFirstOpen
+    const onbCur = onbDenCur > 0 ? (onbNumCur / onbDenCur) * 100 : 0
+    const onbPrev = onbDenPrev > 0 ? (onbNumPrev / onbDenPrev) * 100 : 0
     const onboardingRate: KPIMetric = { value: onbCur, change: pctChange(onbCur, onbPrev) }
 
-    // ---- Transaction Rate = transacting users / users reaching dashboard ----
-    const txCur = dashboardUsers > 0 ? (txUsers / dashboardUsers) * 100 : 0
-    const txPrev = prevDashboardUsers > 0 ? (prevTxUsers / prevDashboardUsers) * 100 : 0
+    // ---- Transaction Rate = transacting users / users reaching dashboard.
+    // Same GA4 period-wide unique method (Android/iOS), with ga_events fallback. ----
+    const txNumCur = rateInputsCur ? rateInputsCur.tx : txUsers
+    const txDenCur = rateInputsCur ? rateInputsCur.dashboard : dashboardUsers
+    const txNumPrev = rateInputsPrev ? rateInputsPrev.tx : prevTxUsers
+    const txDenPrev = rateInputsPrev ? rateInputsPrev.dashboard : prevDashboardUsers
+    const txCur = txDenCur > 0 ? (txNumCur / txDenCur) * 100 : 0
+    const txPrev = txDenPrev > 0 ? (txNumPrev / txDenPrev) * 100 : 0
     const transactionRate: KPIMetric = { value: txCur, change: pctChange(txCur, txPrev) }
 
     // ---- Trend: daily new installs (first_open) vs daily active users (session_start users) ----
@@ -414,6 +432,7 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
       ratingsSourced,
       onboardingRate,
       transactionRate,
+      ratesSourced,
       usageTrend,
       onboardingFunnel,
       onboardingFunnelSourced,
@@ -499,6 +518,7 @@ export default async function AppPerformancePage({
   notLive.push('App Store is not connected (needs App Store Connect / the Russian storefront) — its card shows “Not connected”.')
   if (!data.activeUsersSourced) notLive.push('Active Users falls back to session users (the GA4 app active-users metric is unavailable).')
   if (data.hasEvents && !data.onboardingFunnelSourced) notLive.push('The onboarding funnel fell back to summed ga_events user rows (GA4 was unavailable), which can double-count a user across signup paths and is not the period-wide unique count.')
+  if (data.hasEvents && !data.ratesSourced) notLive.push('Onboarding Rate and Transaction Rate fell back to summed ga_events user rows (GA4 was unavailable), which over-counts and is not the period-wide unique rate.')
 
   return (
     <div>
@@ -555,7 +575,7 @@ export default async function AppPerformancePage({
           changeValue={deltaFromPct(data.onboardingRate.value, data.onboardingRate.change)}
           trend={getTrend(data.onboardingRate.change)}
           iconName="filter"
-          tooltip="Onboarding completions vs new installs (approx.): users completing *_ONBOARDING_GUIDE_COMPLETE ÷ first_open."
+          tooltip="Onboarding completions ÷ new installs, as GA4 period-wide unique users (Android/iOS): users completing *_ONBOARDING_GUIDE_COMPLETE ÷ first_open users. Cross-checks against a GA4 Explore Total."
         />
         <KPICard
           title="Transaction Rate"
@@ -564,7 +584,7 @@ export default async function AppPerformancePage({
           changeValue={deltaFromPct(data.transactionRate.value, data.transactionRate.change)}
           trend={getTrend(data.transactionRate.change)}
           iconName="dollar-sign"
-          tooltip="Transacting users ÷ users reaching the dashboard (send / swap / ramp events, all platforms)."
+          tooltip="Transacting users ÷ users reaching the dashboard, as GA4 period-wide unique users (Android/iOS): send / swap / ramp events. Cross-checks against a GA4 Explore Total (a behavioural rate, not revenue)."
         />
       </div>
 
