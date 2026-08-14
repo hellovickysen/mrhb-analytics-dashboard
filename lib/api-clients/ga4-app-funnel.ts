@@ -19,8 +19,6 @@
  * PLATFORM SCOPE — Android & iOS. Event names encode platform+type in a 3-char
  * prefix: E (event) or S (screen), then A (Android) or I (iOS). The `^[ES][AI]_`
  * gate keeps Android+iOS and excludes web (EW_/SW_) / extension (EE_/SE_).
- * (first_open is the Firebase-standard event with no such prefix; it is an
- * app-only install event, so it is matched by exact name without a prefix gate.)
  *
  * Server-only module — never import from a 'use client' component. Every
  * exported fetcher returns `null` on missing auth / API failure so callers can
@@ -41,8 +39,8 @@ export interface AppOnboardingFunnel {
 
 /** Inputs for the Onboarding Rate and Transaction Rate cards (period-wide unique). */
 export interface AppRateInputs {
-  /** Distinct users with a first_open (new installs, app-only). */
-  firstOpen: number
+  /** Distinct users who started a new-user signup path (the funnel top). */
+  signupStarted: number
   /** Distinct users who completed onboarding. */
   complete: number
   /** Distinct users who reached the app dashboard. */
@@ -64,8 +62,6 @@ const ONBOARDING_COMPLETE_REGEX = '^[ES][AI]_.*ONBOARDING_GUIDE_COMPLETE'
 const APP_DASHBOARD_REGEX = '^[ES][AI]_.*APP_DASHBOARD'
 // Mirrors the default `transaction` app-metric patterns (send / swap / ramp).
 const TRANSACTION_REGEX = '^[ES][AI]_.*(SEND_MONEY|_SEND_|SWAP|SAHAL_RAMP)'
-// first_open is the Firebase-standard install event (no platform prefix).
-const FIRST_OPEN_REGEX = '^FIRST_OPEN$'
 
 function toNum(value: string | undefined | null): number {
   if (value === undefined || value === null || value === '') return 0
@@ -159,14 +155,14 @@ export async function fetchGA4AppRateInputs(
     if (!app) return null
     const { client, property } = app
 
-    const [firstOpen, complete, dashboard, tx] = await Promise.all([
-      periodUniqueActiveUsers(client, property, startDate, endDate, FIRST_OPEN_REGEX),
+    const [signupStarted, complete, dashboard, tx] = await Promise.all([
+      periodUniqueActiveUsers(client, property, startDate, endDate, SIGNUP_STARTED_REGEX),
       periodUniqueActiveUsers(client, property, startDate, endDate, ONBOARDING_COMPLETE_REGEX),
       periodUniqueActiveUsers(client, property, startDate, endDate, APP_DASHBOARD_REGEX),
       periodUniqueActiveUsers(client, property, startDate, endDate, TRANSACTION_REGEX),
     ])
 
-    return { firstOpen, complete, dashboard, tx }
+    return { signupStarted, complete, dashboard, tx }
   } catch (error) {
     console.error('[ga4-app-funnel] fetchGA4AppRateInputs failed:', error)
     return null

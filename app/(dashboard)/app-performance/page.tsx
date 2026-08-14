@@ -261,16 +261,19 @@ async function getAppPerformanceData(searchParams?: { range?: string }): Promise
         }
       : { value: 0, change: null }
 
-    // ---- Onboarding Rate = onboarding-complete users / new installs.
-    // Uses GA4 PERIOD-WIDE UNIQUE users (Android/iOS) — the same de-dup method as
-    // the funnel — so it reconciles with GA4 and no longer over-counts by summing
-    // ga_events `users` across days/events. Falls back to the ga_events sums only
-    // if GA4 is unavailable (flagged in the banner). ----
+    // ---- Onboarding Rate = onboarding-complete users / NEW USER SIGNUP.
+    // Denominator is the funnel's top stage (users who STARTED signup), not
+    // first_open installs — so this equals the funnel's overall finish rate and
+    // answers "of people who began signup, how many completed onboarding". Uses
+    // GA4 PERIOD-WIDE UNIQUE users (Android/iOS), same de-dup method as the funnel;
+    // falls back to ga_events sums only if GA4 is unavailable (flagged in banner). ----
+    const pSignupFallback = (n: string) =>
+      n.includes('ONBOARDING_LETS_GO') || n.includes('ONBOARDING_SOCIAL_SIGNUP') || n.includes('ONBOARDING_IMPORT_WALLET')
     const ratesSourced = !!rateInputsCur
     const onbNumCur = rateInputsCur ? rateInputsCur.complete : completeUsers
-    const onbDenCur = rateInputsCur ? rateInputsCur.firstOpen : firstOpen
+    const onbDenCur = rateInputsCur ? rateInputsCur.signupStarted : usr(events, pSignupFallback)
     const onbNumPrev = rateInputsPrev ? rateInputsPrev.complete : prevCompleteUsers
-    const onbDenPrev = rateInputsPrev ? rateInputsPrev.firstOpen : prevFirstOpen
+    const onbDenPrev = rateInputsPrev ? rateInputsPrev.signupStarted : usr(prevEvents, pSignupFallback)
     const onbCur = onbDenCur > 0 ? (onbNumCur / onbDenCur) * 100 : 0
     const onbPrev = onbDenPrev > 0 ? (onbNumPrev / onbDenPrev) * 100 : 0
     const onboardingRate: KPIMetric = { value: onbCur, change: pctChange(onbCur, onbPrev) }
@@ -575,7 +578,7 @@ export default async function AppPerformancePage({
           changeValue={deltaFromPct(data.onboardingRate.value, data.onboardingRate.change)}
           trend={getTrend(data.onboardingRate.change)}
           iconName="filter"
-          tooltip="Onboarding completions ÷ new installs, as GA4 period-wide unique users (Android/iOS): users completing *_ONBOARDING_GUIDE_COMPLETE ÷ first_open users. Cross-checks against a GA4 Explore Total."
+          tooltip="Onboarding completions ÷ new user signups, as GA4 period-wide unique users (Android/iOS): *_ONBOARDING_GUIDE_COMPLETE ÷ users who started signup. Equals the funnel's overall finish rate; cross-checks against a GA4 Explore Total."
         />
         <KPICard
           title="Transaction Rate"
